@@ -1,0 +1,39 @@
+# Local runtime and credentials (including imported release directories)
+runtime/
+runtime-v*/
+runtime.before-*/
+.env
+.env.*
+!.env.example
+!.env.sample
+registry.key
+*.key
+*.pem
+*.p12
+*.pfx
+.kube/
+*reader.json
+*.kubeconfig
+
+# Local data, backups and release bundles
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.tar
+*.tar.gz
+*.tgz
+
+# Generated Python/test output
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+node_modules/
