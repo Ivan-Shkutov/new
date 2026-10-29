@@ -93,7 +93,7 @@ async function loadPage() {
 }
 async function loadOverview() {
   const target = $('#overview-content');
-  const data = await api('/overview'); state.overview = data.clusters || []; $('#version').textContent = data.version || '0.6.0'; clear(target);
+  const data = await api('/overview'); state.overview = data.clusters || []; $('#version').textContent = data.version || '0.6.1'; clear(target);
   const clusters = state.cluster ? state.overview.filter(item => item.id === state.cluster) : state.overview;
   if (!clusters.length) { target.append(empty('Подключите первый кластер', 'Pulse собирает факты из Kubernetes, сопоставляет их с метриками и помогает расследовать проблемы. Начните с подключения только для чтения.', button('+ Добавить кластер', () => openCluster(), ''))); return; }
   const stats = node('div', 'grid stats');

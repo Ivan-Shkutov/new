@@ -1,3 +1,4 @@
--r requirements.txt
+# First install runtime separately: pip install --require-hashes -r requirements.txt
+# Then install this file; pip cannot mix hashed runtime and unhashed test tools.
 pytest==8.3.5
 playwright==1.51.0

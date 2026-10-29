@@ -1,12 +1,12 @@
-# Pulse Clusters 0.6.0
+# Pulse Clusters 0.6.1
 
 Самостоятельная панель наблюдения за Kubernetes: несколько кластеров, 22 типа ресурсов, метрики Prometheus/VictoriaMetrics, логи Kubernetes и адаптер логов Astra, контекстные вопросы локальной LLM, документы с полнотекстовым поиском, история расследований и подтверждённые решения.
 
-**Начните с [полной инструкции установки](docs/INSTALL-RU.md).** [Проверки выпуска](docs/QA-RU.md) · [Контракты интеграций](docs/CONNECTORS-RU.md).
+**Начните с [пошаговой инструкции для вашего сервера](START-HERE-RU.md).** [Полная установка и эксплуатация](docs/INSTALL-RU.md). [Проверки выпуска](docs/QA-RU.md) · [Контракты интеграций](docs/CONNECTORS-RU.md).
 
 ## Запуск с нуля
 
-Linux, Python 3.12+, Docker Engine и Compose v2. Панель по умолчанию доступна только на localhost:8090.
+Linux, Python 3.12+, Docker Engine и Compose plugin с поддержкой `up --wait` (v2 и новее). Панель по умолчанию доступна только на localhost:8090.
 
 ```bash
 git clone https://github.com/Ivan-Shkutov/new.git pulse-clusters

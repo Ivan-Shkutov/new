@@ -252,6 +252,24 @@ def create_app(runtime=None, polling=True):
                 raise HTTPException(422, f'Некорректное имя поля {field}')
         return source
 
+    def merge_source(previous, patch):
+        # Endpoint changes must not forward a credential to a different service.
+        previous = dict(previous)
+        patch = dict(patch)
+        credential_fields = ('token', 'password', 'username', 'api_key', 'ca_pem')
+        clear = patch.pop('clear_credentials', False)
+        if not isinstance(clear, bool):
+            raise HTTPException(422, 'clear_credentials должен быть boolean')
+        endpoint_changed = 'url' in patch and patch['url'].rstrip('/') != previous.get('url', '').rstrip('/') if isinstance(patch.get('url', ''), str) else False
+        if endpoint_changed or clear:
+            for key in credential_fields:
+                previous.pop(key, None)
+        else:
+            for key in credential_fields:
+                if patch.get(key) == '' and previous.get(key):
+                    patch.pop(key)
+        return validate_source({**previous, **patch})
+
     @api.post('/clusters', status_code=201)
     def add_cluster(body: ClusterInput):
         if db().cluster(body.id):
@@ -279,11 +297,7 @@ def create_app(runtime=None, polling=True):
         for field in ('metrics','astra'):
             val = getattr(body, field)
             if val is not None:
-                previous = cfg.get(field, {})
-                for secret in ('password','token','ca_pem'):
-                    if val.get(secret) == '' and previous.get(secret):
-                        val[secret] = previous[secret]
-                cfg[field] = validate_source({**previous, **val})
+                cfg[field] = merge_source(cfg.get(field, {}), val)
         db().execute('UPDATE clusters SET name=?,enabled=?,config=? WHERE id=?', (body.name or item['name'], item['enabled'] if body.enabled is None else body.enabled, db().encrypt(cfg), cid))
         if body.kubeconfig:
             db().execute('DELETE FROM snapshots WHERE cluster_id=?', (cid,))
@@ -344,9 +358,7 @@ def create_app(runtime=None, polling=True):
     @api.put('/settings')
     def set_settings(body: SettingsInput):
         current = db().settings()
-        llm = validate_source(body.llm)
-        if not llm.get('api_key') and current.get('llm', {}).get('api_key'):
-            llm['api_key'] = current['llm']['api_key']
+        llm = merge_source(current.get('llm', {}), body.llm)
         current['llm'] = llm
         db().execute('INSERT OR REPLACE INTO settings VALUES (1,?)', (db().encrypt(current),))
         return settings()

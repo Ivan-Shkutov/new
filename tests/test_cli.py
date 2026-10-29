@@ -122,3 +122,13 @@ def test_compose_command_keeps_project_scoped(tmp_path):
     command = cli.compose_command(runtime)
     assert 'pulse-clusters-8091' in command
     assert str(ROOT / 'compose.yaml') in command
+
+
+def test_init_never_replaces_lost_key_for_existing_database(tmp_path):
+    runtime = tmp_path / 'runtime'
+    cli.initialize(runtime)
+    (runtime / 'pulse.sqlite3').write_bytes(b'existing encrypted installation')
+    (runtime / 'registry.key').unlink()
+    with pytest.raises(ValueError, match='original key'):
+        cli.initialize(runtime)
+    assert not (runtime / 'registry.key').exists()

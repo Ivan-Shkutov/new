@@ -377,3 +377,33 @@ def test_pydantic_validation_does_not_echo_kubeconfig_or_credentials(client):
     response = client.put('/api/settings', json={'llm':'do-not-echo-this-secret'}, headers=MUTATION)
     assert response.status_code == 422
     assert 'do-not-echo-this-secret' not in response.text
+
+
+def test_model_endpoint_change_does_not_forward_old_credentials(client, runtime):
+    client.put('/api/settings', json={'llm': {'url':'https://model-a.test/v1','model':'one','api_key':'private-key'}}, headers=MUTATION)
+    response = client.put('/api/settings', json={'llm': {'url':'https://model-b.test/v1','model':'two'}}, headers=MUTATION)
+    assert response.status_code == 200
+    assert not response.json()['llm']['has_key']
+
+
+def test_explicit_credential_clear_on_same_endpoint(client):
+    client.put('/api/settings', json={'llm': {'url':'https://model.test/v1','model':'one','api_key':'private-key'}}, headers=MUTATION)
+    response = client.put('/api/settings', json={'llm': {'clear_credentials': True}}, headers=MUTATION)
+    assert response.status_code == 200
+    assert not response.json()['llm']['has_key']
+    assert response.json()['llm']['model'] == 'one'
+
+
+def test_metrics_endpoint_change_clears_old_auth_and_ca(client, runtime, monkeypatch):
+    add(client, metrics={'url':'https://a.test','token':'private-token','username':'user','password':'private-password','ca_pem':'old CA','labels':{'cluster':'one'}})
+    response = client.put('/api/clusters/one', json={'metrics':{'url':'https://b.test'}}, headers=MUTATION)
+    assert response.status_code == 200
+    captured = []
+    def query(settings, metric):
+        captured.append(settings)
+        return {'data':{'result':[]}}
+    monkeypatch.setattr(connectors, 'query_metrics', query)
+    assert client.get('/api/clusters/one/metrics').status_code == 200
+    assert captured
+    assert all(not any(k in cfg for k in ('token','username','password','ca_pem')) for cfg in captured)
+    assert captured[0]['labels'] == {'cluster':'one'}
