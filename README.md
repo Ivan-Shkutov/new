@@ -4,6 +4,12 @@
 
 **Начните с [пошаговой инструкции для вашего сервера](START-HERE-RU.md).** [Полная установка и эксплуатация](docs/INSTALL-RU.md). [Подключить кластер и проверить работу](docs/CONNECT-CLUSTER-RU.md) · [Проверки выпуска](docs/QA-RU.md) · [Контракты интеграций](docs/CONNECTORS-RU.md).
 
+## Выбор нового обзора
+
+[Четыре макета дашборда: Headlamp / Lens + Grafana / Rancher / Pulse 360](design/overview-variants/README.md). Это варианты для выбора, рабочий интерфейс ими пока не заменён.
+
+[Подключение локальной LLM qwen и проверка расследования](docs/LLM-LOCAL-RU.md).
+
 ## Запуск с нуля
 
 Linux, Python 3.12+, Docker Engine и Compose plugin с поддержкой `up --wait` (v2 и новее). Панель по умолчанию доступна только на localhost:8090.
