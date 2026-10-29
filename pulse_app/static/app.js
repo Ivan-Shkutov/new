@@ -110,29 +110,58 @@ function workloadCard(kind, value, clusters) {
   const card=node('article','workload-card'), known=value?.total!==null && value?.total!==undefined;
   card.dataset.testid=`workload-${kind}`;
   card.append(append(node('div','workload-title'),node('h3','',workloadNames[kind]),node('span','metadata',known?`${value.positive} / ${value.total} ${value.label}`:'Нет данных')),
-    donut(value?.percent,workloadNames[kind],value?.percent!==null&&value?.percent<100?'amber':''));
+    donut(value?.percent,workloadNames[kind],value?.health==='critical'?'danger':value?.health==='warning'?'amber':value?.health==='unknown'?'muted-ring':''));
+  card.classList.add('workload-'+(value?.health||'neutral'));
+  card.append(healthBadge(value?.health||'neutral'));
   const foot=node('div','workload-foot');
   if(known && !value.total) foot.append(node('small','muted','Объектов нет'));
   if(value?.partial) foot.append(node('small','warning-text','Выборка неполная'));
   if(value?.stale) foot.append(node('small','warning-text','Проверьте время снимка'));
-  if(value?.states) foot.append(node('small','muted',Object.entries(value.states).map(([k,v])=>`${k}: ${v}`).join(' · ')));
+  if(value?.states) foot.append(node('small','muted',Object.entries(value.states).map(([k,v])=>`${stateLabels[k]||k}: ${v}`).join(' · ')));
   if(clusters.length===1) foot.append(button('Ресурсы →',()=>resourceView(clusters[0].id,kind)));
   card.append(foot);return card;
 }
+const healthLabels={healthy:'В норме',critical:'Проблема',warning:'Внимание',unknown:'Нет подтверждения',stale:'Устарело',paused:'Пауза',neutral:'Нет объектов'};
+const stateLabels={ready:'Готовы',completed:'Завершены',enabled:'Включены',active:'Выполняются',pending:'Ожидают',not_ready:'Не готовы',failed:'Ошибка',suspended:'Приостановлены',updating:'Обновляются',scaled_zero:'Реплик: 0',terminating:'Удаляются',unknown:'Неизвестно'};
+function healthBadge(value){return node('span',`health-badge ${value}`,healthLabels[value]||'Нет данных');}
+function ratio(ready,total){return Number.isFinite(total)&&Number.isFinite(ready)?`${ready}/${total}`:'—';}
+function healthTile(title,value,hint,health,id,onClick){const tile=node('article',`stat signal-tile ${health||'unknown'}`);tile.dataset.testid=id;tile.append(append(node('div','signal-title'),node('span','',title),id==='scope'?node('span','health-badge','Kubernetes'):healthBadge(health)),node('strong','',value),node('small','',hint));if(onClick){const action=button('Подробнее →',onClick);tile.append(action);}return tile;}
+function renderHealthBanner(target,data,clusters){const health=data.health||{status:'unknown',label:'Нет подтверждения'},banner=node('section',`health-banner ${health.status}`);banner.dataset.testid='cluster-health';
+const heading=health.status==='healthy'?'Наблюдаемые объекты Kubernetes готовы':health.status==='critical'?'Есть проблемы — начните с красных карточек':health.status==='stale'?'Состояние изменилось? Сначала обновите данные':health.status==='paused'?'Сбор данных приостановлен':health.status==='warning'?'Есть состояния, требующие проверки':'Не хватает данных для оценки кластера';
+banner.append(append(node('div'),node('div','eyebrow','СОСТОЯНИЕ KUBERNETES'),node('h2','',heading),node('p','',`${health.critical||0} критических сигналов · ${health.warning||0} предупреждений · автообновление 30 с`)),healthBadge(health.status));target.append(banner);
+const urgent=(data.issues||[]).filter(i=>i.severity==='critical'&&!i.stale).slice(0,3);
+if(urgent.length){const preview=node('div','urgent-preview');urgent.forEach(i=>preview.append(append(node('div'),node('strong','',i.title||i.state),node('span','',`${i.name} · ${i.namespace||i.cluster_name}`))));preview.append(button('Все сигналы ↓',()=>$('#problem-list')?.scrollIntoView({behavior:'smooth'})));target.append(preview);}
+if(clusters.some(c=>c.health?.incomplete))notice(target,'Снимок неполный: часть типов ресурсов недоступна или достигнут лимит выборки. Неизвестное состояние не считается исправным.','warning');
+}
+function renderNodePanel(target,clusters){const panel=node('details','panel node-panel');panel.open=nodeDetailsOpen;panel.addEventListener('toggle',()=>{nodeDetailsOpen=panel.open;});panel.append(node('summary','','Состояние узлов — раскрыть детализацию'));panel.append(append(node('div','section-heading'),node('h2','','Узлы: готовность и давление ресурсов'),node('small','muted','Готовность, conditions и размещение Pod')));
+const table=node('table'),head=node('tr');['Узел','Ready','Проблемы / обслуживание','Pods','Версия',''].forEach(t=>head.append(node('th','',t)));table.append(append(node('thead'),head));const body=node('tbody');let count=0;
+for(const c of clusters)for(const n of c.health?.node_rows||[]){count++;const tr=node('tr');tr.dataset.testid='node-row';const tone=c.health.status==='stale'||c.health.status==='paused'?'unknown':n.status;tr.className=`node-${tone}`;const flags=node('td');if(n.problems.length)flags.append(node('span','',n.problems.join(' · ')));else flags.append(node('span','muted','Нет отмеченных conditions'));if(n.unschedulable)flags.append(node('span','chip warning','Cordon — новые Pod не назначаются'));tr.append(append(node('td'),node('strong','',n.name),node('small','metadata',`${c.name} · ${n.ip}`)),append(node('td'),healthBadge(tone)),flags,node('td','',n.pods??'—'),node('td','',n.version),append(node('td'),button('Узел →',()=>{resourceView(c.id,'nodes');$('#resource-search').value=n.name;})));body.append(tr);}
+table.append(body);if(count)panel.append(append(node('div','table-wrap'),table));else notice(panel,'Информация об узлах ещё не получена. Проверьте сбор и права доступа.','warning');target.append(panel);}
+function renderWarningEvents(target,clusters){const rows=clusters.flatMap(c=>(c.health?.events||[]).map(e=>({...e,cluster:c.name})));const details=node('details','panel warning-events');details.open=warningEventsOpen;details.addEventListener('toggle',()=>{warningEventsOpen=details.open;});details.append(node('summary','',`Warning-события за последние 15 минут · ${rows.length}`),node('p','muted','События — дополнительный контекст. Они не доказывают, что проблема продолжается сейчас.'));if(!rows.length)details.append(node('p','muted','В доступной выборке свежих Warning-событий нет.'));
+for(const e of rows.slice(0,20)){details.append(append(node('div','event-row'),node('strong','',`${e.reason} · ${e.name}`),node('small','metadata',`${e.cluster} · ${e.namespace} · ${date(e.time)} · повторений: ${e.count}`),node('p','',e.message)));}target.append(details);}
+
+let overviewRequest=0, issueFilter='all', warningEventsOpen=false, nodeDetailsOpen=false;
 async function loadOverview() {
-  const target=$('#overview-content'), selected=state.cluster;
+  const request=++overviewRequest, target=$('#overview-content'), selected=state.cluster;
   const data=await api('/dashboard'+(selected?`?cluster_id=${encodeURIComponent(selected)}`:''));
-  if(selected!==state.cluster || state.page!=='overview')return;
+  if(request!==overviewRequest || selected!==state.cluster || state.page!=='overview')return;
   state.overview=data.clusters||[];$('#version').textContent=data.version;clear(target);
   const clusters=state.overview;
   if(!clusters.length){target.append(empty('Подключите первый кластер','Добавьте подключение Kubernetes с правами чтения.',button('+ Добавить кластер',()=>openCluster(),'')));return;}
   const total=key=>{const rows=clusters.filter(c=>Number.isFinite(c.counts?.[key]));return rows.length?rows.reduce((n,c)=>n+c.counts[key],0):'—';};
-  const stats=node('div','grid stats');
-  for(const [label,value,hint] of [['Кластеры',clusters.length,selected?currentClusterName():'Все подключения'],['Узлы',total('nodes'),'По доступным снимкам'],['Pods',total('pods'),'Running ≠ Ready'],['Namespaces',total('namespaces'),'Область выбранных кластеров']]) stats.append(append(node('div','stat'),node('span','',label),node('strong','',value),node('small','',hint)));
+  renderHealthBanner(target,data,clusters);
+  const h=data.health||{}, nh=h.nodes||{}, stats=node('div','grid stats');
+  const pr=clusters.reduce((a,c)=>a+(c.health?.pods?.ready||0),0), pa=clusters.reduce((a,c)=>a+(c.health?.pods?.active||0),0);
+  const pk=clusters.every(c=>c.health?.pods?.active!==null&&c.health?.pods?.active!==undefined);
+  const pt=clusters.some(c=>c.health?.status==='stale'||c.health?.status==='unknown'||c.health?.status==='paused')?'unknown':clusters.some(c=>c.issues?.some(i=>i.kind==='pods'&&i.severity==='critical'))?'critical':pr<pa?'warning':pa?'healthy':'neutral';
+  stats.append(healthTile('Узлы Ready',ratio(nh.ready,nh.total),'Готовые / все наблюдаемые узлы',nh.health||'unknown','nodes-ready',()=>{const panel=$('.node-panel');if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth'});}}));
+  stats.append(healthTile('Активные Pods Ready',pk?ratio(pr,pa):'—','Завершённые и удаляемые исключены',pt,'pods-ready',clusters.length===1?()=>resourceView(clusters[0].id,'pods'):null));
+  stats.append(healthTile('Критические сигналы',h.critical??'—','Узлы, запуск контейнеров и deadlines',h.status==='stale'||h.status==='unknown'||h.status==='paused'?'unknown':h.critical?'critical':'healthy','critical-signals',()=>$('#problem-list')?.scrollIntoView({behavior:'smooth'})));
+  stats.append(healthTile('Область наблюдения',`${clusters.length} / ${total('namespaces')}`,'Кластеры / namespaces','neutral','scope'));
   target.append(stats);
   const map=node('div','panel cluster-map');map.append(append(node('div','section-heading'),node('h2','','Карта кластеров'),button('+ Добавить кластер',()=>openCluster())));
-  const table=node('table'),thead=node('thead'),tr=node('tr');['Кластер','Сбор данных','Nodes / Pods','Наблюдение','Источники',''].forEach(t=>tr.append(node('th','',t)));thead.append(tr);table.append(thead);
-  const body=node('tbody');clusters.forEach(c=>{const r=node('tr');r.append(node('td','',c.name),append(node('td'),statusChip(c.status,c.enabled)),node('td','',`${c.counts.nodes??'—'} / ${c.counts.pods??'—'}`),node('td','',date(c.observed_at)),node('td','',`Kubernetes · метрики ${c.sources.metrics?'настроены':'—'} · Astra ${c.sources.astra?'настроена':'—'}`),append(node('td'),button('Открыть',()=>{setCluster(c.id);loadPage();})));body.append(r);});table.append(body);map.append(append(node('div','table-wrap'),table));target.append(map);
+  const table=node('table'),thead=node('thead'),tr=node('tr');['Кластер','Состояние / сбор','Nodes / Pods','Наблюдение','Источники',''].forEach(t=>tr.append(node('th','',t)));thead.append(tr);table.append(thead);
+  const body=node('tbody');clusters.forEach(c=>{const r=node('tr');r.append(node('td','',c.name),append(node('td'),healthBadge(c.health?.status||'unknown'),node('small','metadata',`Сбор: ${{ok:'обновляется',degraded:'неполный',stale:'устарел',paused:'пауза',waiting:'первичный'}[c.status]||c.status}`)),node('td','',`Узлы ${ratio(c.health?.nodes?.ready,c.health?.nodes?.total)} · Pods ${c.counts.pods??'—'}`),node('td','',date(c.observed_at)),node('td','',`Kubernetes · метрики ${c.sources.metrics?'настроены':'—'} · Astra ${c.sources.astra?'настроена':'—'}`),append(node('td'),button('Открыть',()=>{setCluster(c.id);loadPage();})));body.append(r);});table.append(body);map.append(append(node('div','table-wrap'),table));target.append(map);
   const metricHeading=node('div','section-heading');metricHeading.append(node('h2','','Утилизация ресурсов'));
   const range=node('select');range.setAttribute('aria-label','Интервал графиков');range.className='range-select';for(const [v,t] of [['1h','1 час'],['6h','6 часов'],['24h','24 часа']])range.append(new Option(t,v));range.value=metricWindow;
   range.addEventListener('change',()=>{metricWindow=range.value;loadPage();});metricHeading.append(range);target.append(metricHeading);
@@ -140,16 +169,20 @@ async function loadOverview() {
   const metricCid=selected||(clusters.length===1?clusters[0].id:null);
   if(!metricCid)notice(metricTarget,'Выберите кластер слева для утилизации и графиков. Проценты разных кластеров не усредняются.');
   else {notice(metricTarget,'Получение метрик…');api(`/clusters/${encodeURIComponent(metricCid)}/dashboard-metrics?window=${metricWindow}`).then(result=>{if(metricTarget.isConnected&&selected===state.cluster)renderDashboardMetrics(metricTarget,result);}).catch(e=>{if(metricTarget.isConnected)notice(clear(metricTarget),errorText(e),'error');});}
+  renderNodePanel(target,clusters);
   target.append(append(node('div','section-heading'),node('h2','','Состояние workloads')));
   target.append(node('p','inline-help','Процент объектов Ready / завершённых Jobs / включённых CronJobs. Пустой набор не означает 100%.'));
   const cards=node('div','workload-grid');for(const kind of Object.keys(workloadNames))cards.append(workloadCard(kind,data.workloads[kind],clusters));target.append(cards);
-  const bottom=node('div','overview-bottom'),issues=node('div','panel');issues.append(node('h2','',`Требует проверки · ${data.issues_total}`));
-  if(!data.issues.length)notice(issues,'В доступном снимке нет отмеченных состояний. Проверьте полноту и свежесть данных.');
-  for(const issue of data.issues){const row=node('div','issue-row');row.append(append(node('div'),node('strong','',issue.name),node('small','muted',`${issue.cluster_name} · ${issue.namespace||issue.kind} · ${issue.state}${issue.stale?' · старый снимок':''}`)));row.append(button(issue.kind==='pods'?'Почему?':'Ресурс',()=>{if(issue.kind!=='pods'){resourceView(issue.cluster_id,issue.kind);return;}setCluster(issue.cluster_id);const form=$('#investigation-form');form.elements.namespace.value=issue.namespace;form.elements.pod.value=issue.name;form.elements.question.value=`Объясни состояние Pod ${issue.name}. Укажи наблюдения, гипотезы и безопасные проверки.`;location.hash='investigations';}));issues.append(row);}
+  const bottom=node('div','overview-bottom'),issues=node('div','panel');issues.id='problem-list';issues.append(node('h2','',`Требует проверки · ${data.issues_total}`));
+  const filter=node('select');filter.setAttribute('aria-label','Фильтр проблем');for(const [v,t] of [['all','Все сигналы'],['critical','Критические'],['warning','Предупреждения']])filter.append(new Option(t,v));filter.value=issueFilter;issues.append(filter);
+  const list=node('div');issues.append(list);
+  const showIssues=()=>{clear(list);const found=data.issues.filter(i=>filter.value==='all'||i.severity===filter.value);if(!found.length)notice(list,'В доступной выборке нет сигналов выбранного уровня. Проверяйте свежесть и полноту данных.');for(const issue of found){const row=node('div',`issue-row severity-${issue.stale?'historical':issue.severity||'warning'}`);row.append(append(node('div'),node('span',`severity-label ${issue.stale?'historical':issue.severity||'warning'}`,issue.stale?'ПО ПРОШЛОМУ СНИМКУ':issue.severity==='critical'?'КРИТИЧЕСКИЙ СИГНАЛ':'ПРЕДУПРЕЖДЕНИЕ'),node('strong','',issue.title||issue.state),node('small','muted',`${issue.name} · ${issue.cluster_name} · ${issue.namespace||issue.kind}`),node('p','',issue.detail||'')));
+  row.append(button(issue.kind==='pods'?'Почему?':'Ресурс',()=>{if(issue.kind!=='pods'){resourceView(issue.cluster_id,issue.kind);return;}setCluster(issue.cluster_id);const form=$('#investigation-form');form.elements.namespace.value=issue.namespace;form.elements.pod.value=issue.name;form.elements.question.value=`Объясни состояние Pod ${issue.name}. Симптом: ${issue.title||issue.state}. Укажи факты, гипотезы и безопасные проверки.`;location.hash='investigations';}));list.append(row);}};filter.addEventListener('change',()=>{issueFilter=filter.value;showIssues();});showIssues();
   const sources=node('div','panel');sources.append(node('h2','','Источники и диагностика'),node('p','muted','Статус сбора API не означает, что все приложения исправны.'));
   for(const c of clusters){sources.append(node('h3','',c.name));if(c.error)notice(sources,c.error,'warning');sources.append(node('p','',`Метрики: ${c.sources.metrics?'настроены':'не подключены'} · Astra: ${c.sources.astra?'настроена':'не подключена'}`));}
   sources.append(node('p','',`Локальная LLM: ${data.llm_configured?'настроена — проверьте анализ конкретного Pod':'укажите URL и Model ID в настройках'}`),button('Настройки источников',()=>location.hash='settings'));
-  bottom.append(issues,sources);target.append(bottom);
+  const restarts=clusters.reduce((n,c)=>n+(c.health?.pods?.restarts||0),0);sources.append(node('p','muted',`Рестарты текущих Pod: ${restarts} (накопленные счётчики, не скорость за интервал)`));
+  bottom.append(issues,sources);target.append(bottom);renderWarningEvents(target,clusters);
 }
 function renderDashboardMetrics(target,result) {
   clear(target);if(result.error)notice(target,result.error,'warning');
@@ -159,6 +192,8 @@ function renderDashboardMetrics(target,result) {
     const value=result.metrics?.[key],card=node('article','panel utilization-card');card.dataset.testid=`utilization-${key}`;
     const stale=value?.observed_at && Date.now()/1000-value.observed_at>120;
     card.append(append(node('div','utilization-head'),append(node('div'),node('h3','',title),node('small','muted',hint)),donut(value?.percent,title,stale?'amber':value?.percent>=90?'danger':value?.percent>=75?'amber':'')));
+    card.classList.add(!Number.isFinite(value?.percent)||stale?'metric-unknown':value.percent>=90?'metric-critical':value.percent>=75?'metric-warning':'metric-healthy');
+    if(Number.isFinite(value?.percent)&&!stale&&value.percent>=75)card.append(node('p',value.percent>=90?'critical-text':'warning-text',value.percent>=90?'Высокая утилизация — проверьте запас ресурсов':'Утилизация выше 75% — следите за запасом'));
     if(!Number.isFinite(value?.percent))card.append(node('p','muted','Нет данных'));
     if(value?.error)notice(card,value.error,'warning');
     if(stale)notice(card,'Значение метрики устарело','warning');
@@ -380,3 +415,5 @@ setInterval(async () => {
   try { await loadInvestigations(); } catch (error) { globalError(error); } finally { state.pollBusy = false; }
 }, 4000);
 (async () => { loading('#overview-content'); try { await loadClusters(); await navigate(); } catch (error) { $('#connection-state').textContent = 'Ошибка подключения'; clear('#overview-content').append(empty('Не удалось получить данные', 'Проверьте доступ к серверу и авторизацию. Повторите запрос кнопкой «Обновить».')); globalError(error); } })();
+
+setInterval(async()=>{if(state.page!=='overview'||document.hidden||state.overviewBusy||document.querySelector('dialog[open]')||document.activeElement?.tagName==='SELECT')return;state.overviewBusy=true;try{await loadOverview();}catch(e){globalError(e);}finally{state.overviewBusy=false;}},30000);

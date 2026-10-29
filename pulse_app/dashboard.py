@@ -45,44 +45,25 @@ def workload_state(kind, obj):
 
 
 def summarize(snapshot, cid, cname, interval=30):
+    from .health import assess, age
     observed = snapshot.get('observed_at')
-    stale = not observed
-    if observed:
-        try:
-            stale = (datetime.now(timezone.utc) - datetime.fromisoformat(observed)).total_seconds() > max(120, 3 * interval)
-        except (ValueError, TypeError):
-            stale = True
-    workloads, issues = {}, []
-    resources = snapshot.get('resources', {})
+    elapsed = age(observed,datetime.now(timezone.utc))
+    stale = elapsed is None or elapsed > max(120,3*interval)
+    workloads = {}
     for kind in WORKLOADS:
-        entry = resources.get(kind)
-        items = entry.get('items', []) if entry else []
-        states = Counter(workload_state(kind, obj) for obj in items)
-        positive = 'completed' if kind == 'jobs' else 'enabled' if kind == 'cronjobs' else 'ready'
+        entry = snapshot.get('resources',{}).get(kind)
+        items = entry.get('items',[]) if entry else []
+        states = Counter(workload_state(kind,obj) for obj in items)
+        positive = 'completed' if kind=='jobs' else 'enabled' if kind=='cronjobs' else 'ready'
         usable = bool(observed and entry is not None and not entry.get('error'))
-        partial = bool(entry and entry.get('truncated'))
         workloads[kind] = {'total':len(items) if usable else None,
                            'positive':states[positive] if usable else None,
-                           'percent':round(100 * states[positive] / len(items), 1) if usable and items else None,
+                           'percent':round(100*states[positive]/len(items),1) if usable and items else None,
                            'label':LABELS[kind], 'states':dict(states) if usable else {},
-                           'partial':partial, 'stale':stale, 'error':entry.get('error') if entry else 'Ещё нет данных'}
-        if not usable:
-            continue
-        for obj in items:
-            state = workload_state(kind, obj)
-            if state not in ('not_ready', 'failed', 'pending', 'updating'):
-                continue
-            meta = obj.get('metadata', {})
-            issues.append({'cluster_id':cid, 'cluster_name':cname, 'kind':kind,
-                           'name':meta.get('name', ''), 'namespace':meta.get('namespace', ''),
-                           'uid':meta.get('uid', ''), 'state':state, 'stale':stale,
-                           'observed_at':observed})
-    for obj in resources.get('nodes', {}).get('items', []):
-        conditions = {c.get('type'):c.get('status') for c in obj.get('status', {}).get('conditions', [])}
-        for name, expected in [('Ready','True'), ('MemoryPressure','False'), ('DiskPressure','False'), ('PIDPressure','False')]:
-            if name in conditions and conditions[name] != expected:
-                issues.append({'cluster_id':cid,'cluster_name':cname,'kind':'nodes','name':obj.get('metadata',{}).get('name',''), 'namespace':'','uid':obj.get('metadata',{}).get('uid',''),'state':name+': '+conditions[name], 'stale':stale,'observed_at':observed})
-    return {'workloads':workloads, 'issues':issues[:40], 'issues_total':len(issues), 'stale':stale}
+                           'partial':bool(entry and entry.get('truncated')), 'stale':stale,
+                           'error':entry.get('error') if entry else 'Ещё нет данных'}
+    health = assess(snapshot,cid,cname,workloads,interval)
+    return {'workloads':workloads,'issues':health['issues'],'issues_total':health['issues_total'],'stale':stale,'health':health}
 
 
 def combine(summaries):
@@ -97,5 +78,7 @@ def combine(summaries):
             states.update(row['states'])
         output[kind] = {'total':total,'positive':positive,'percent':round(100*positive/total,1) if total else None,
                         'label':LABELS[kind],'states':dict(states), 'partial':len(valid)!=len(rows) or any(r['partial'] for r in rows),
-                        'stale':any(r['stale'] for r in rows), 'error':None if valid else 'Нет доступных снимков'}
+                        'stale':any(r['stale'] for r in rows), 'error':None if valid else 'Нет доступных снимков',
+                        'health':'critical' if any(r.get('health')=='critical' for r in rows) else 'unknown' if any(r.get('health')=='unknown' for r in rows) else 'warning' if any(r.get('health')=='warning' for r in rows) else 'healthy' if total else 'neutral',
+                        'problems':sum(r.get('problems',0) for r in rows)}
     return output

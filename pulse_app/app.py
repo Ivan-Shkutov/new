@@ -182,7 +182,7 @@ def create_app(runtime=None, polling=True):
         cfg = row['config']
         return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': bool(cfg.get('metrics', {}).get('url')), 'has_astra': bool(cfg.get('astra', {}).get('url'))}
 
-    from . import dashboard
+    from . import dashboard, health
     metric_cache = {}
     metric_cache_lock = threading.Lock()
 
@@ -195,12 +195,16 @@ def create_app(runtime=None, polling=True):
         summaries = []
         for row in selected:
             summary = dashboard.summarize(snapshot(row['id']), row['id'], row['name'], interval)
+            if not row['enabled']:
+                summary['health'] = health.assess(snapshot(row['id']),row['id'],row['name'],summary['workloads'],interval,enabled=False)
+            summary['issues'] = summary['health']['issues']
             summaries.append(summary)
             row.update(summary)
             cfg = cluster(row['id'])['config']
             row['sources'] = {'metrics':bool(cfg.get('metrics',{}).get('url')), 'astra':bool(cfg.get('astra',{}).get('url'))}
         return {'version':__version__, 'clusters':selected, 'workloads':dashboard.combine(summaries),
-                'issues':[issue for summary in summaries for issue in summary['issues']][:40],
+                'health':health.aggregate([s['health'] for s in summaries]),
+                'issues':sorted([issue for summary in summaries for issue in summary['issues']],key=lambda i:health.SEVERITY_ORDER[i['severity']])[:40],
                 'issues_total':sum(summary['issues_total'] for summary in summaries),
                 'llm_configured':bool(db().settings().get('llm',{}).get('model'))}
 
@@ -238,7 +242,8 @@ def create_app(runtime=None, polling=True):
         for row in clusters()['items']:
             snap = snapshot(row['id'])
             observed = snap.get('observed_at')
-            stale = not observed or (datetime.now(timezone.utc) - datetime.fromisoformat(observed)).total_seconds() > max(120, interval * 3)
+            elapsed = health.age(observed,datetime.now(timezone.utc))
+            stale = elapsed is None or elapsed > max(120,interval*3)
             row.update(observed_at=observed, status='paused' if not row['enabled'] else 'waiting' if not observed else 'stale' if stale else 'degraded' if snap.get('errors') or snap.get('complete') is False or any(r.get('truncated') for r in snap.get('resources', {}).values()) else 'ok', counts={k: len(snap.get('resources', {}).get(k, {}).get('items', [])) if k in snap.get('resources', {}) and not snap['resources'][k].get('error') else None for k in ('nodes','pods','namespaces')}, error='; '.join(snap.get('errors', [])))
             items.append(row)
         return {'version': __version__, 'clusters': items}
