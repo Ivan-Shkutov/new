@@ -1,0 +1,29 @@
+services:
+  pulse:
+    image: pulse-clusters:0.6.0
+    build:
+      context: .
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f}
+    user: "${PULSE_UID:-65532}:${PULSE_GID:-65532}"
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+    volumes:
+      - ${PULSE_RUNTIME_HOST:-./runtime}:/runtime
+    environment:
+      PULSE_RUNTIME: /runtime
+      PULSE_PASSWORD_FILE: /runtime/secrets/portal-password
+      PULSE_USERNAME: ${PULSE_USERNAME:-pulse}
+      PULSE_POLL_SECONDS: ${PULSE_POLL_SECONDS:-30}
+    command: [python, -m, uvicorn, "pulse_app.app:app", --host, "127.0.0.1", --port, "${PULSE_PORT:-8090}"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PULSE_PORT:-8090}/healthz', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 10s

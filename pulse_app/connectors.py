@@ -1,0 +1,416 @@
+"""Bounded, read-only upstream adapters. Never expose upstream bodies in errors."""
+from __future__ import annotations
+
+import base64
+import binascii
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+import json
+import os
+import re
+import ssl
+import tempfile
+import time
+from urllib.parse import quote, urlsplit
+
+import httpx
+import yaml
+
+
+class ConnectorError(ValueError):
+    """Safe operator-facing integration failure."""
+
+
+RESOURCE_PATHS = {
+    "nodes": "/api/v1/nodes", "pods": "/api/v1/pods", "namespaces": "/api/v1/namespaces",
+    "services": "/api/v1/services", "endpoints": "/api/v1/endpoints",
+    "configmaps": "/api/v1/configmaps", "persistentvolumeclaims": "/api/v1/persistentvolumeclaims",
+    "persistentvolumes": "/api/v1/persistentvolumes", "events": "/api/v1/events",
+    "serviceaccounts": "/api/v1/serviceaccounts",
+    "deployments": "/apis/apps/v1/deployments", "statefulsets": "/apis/apps/v1/statefulsets",
+    "daemonsets": "/apis/apps/v1/daemonsets", "replicasets": "/apis/apps/v1/replicasets",
+    "jobs": "/apis/batch/v1/jobs", "cronjobs": "/apis/batch/v1/cronjobs",
+    "ingresses": "/apis/networking.k8s.io/v1/ingresses",
+    "networkpolicies": "/apis/networking.k8s.io/v1/networkpolicies",
+    "storageclasses": "/apis/storage.k8s.io/v1/storageclasses",
+    "horizontalpodautoscalers": "/apis/autoscaling/v2/horizontalpodautoscalers",
+    "replicationcontrollers": "/api/v1/replicationcontrollers",
+    "poddisruptionbudgets": "/apis/policy/v1/poddisruptionbudgets",
+}
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_PAGES = 4
+
+
+def _text(value, name, maximum=1024 * 1024):
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ConnectorError(f"Invalid {name}")
+    return value
+
+
+def _url(value, *, https_only=False):
+    value = _text(value, "endpoint", 4096).rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        parsed.port
+    except ValueError:
+        raise ConnectorError("Invalid endpoint port") from None
+    if (parsed.scheme not in (("https",) if https_only else ("https", "http"))
+            or not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or any(ch.isspace() for ch in value)):
+        raise ConnectorError("Endpoint must be an HTTP(S) URL without credentials, query or fragment")
+    return value
+
+
+def _pem(data, name):
+    if data is None:
+        return ""
+    try:
+        result = base64.b64decode(_text(data, name), validate=True).decode("ascii")
+    except (ValueError, UnicodeError, binascii.Error):
+        raise ConnectorError(f"Invalid base64 {name}") from None
+    if "-----BEGIN " not in result:
+        raise ConnectorError(f"Invalid PEM {name}")
+    return result
+
+
+def validate_kubeconfig(text: str, context: str | None = None) -> dict:
+    """Accept self-contained credentials only; credentials must be encrypted at rest."""
+    try:
+        raw = yaml.safe_load(_text(text, "kubeconfig"))
+    except yaml.YAMLError:
+        raise ConnectorError("Invalid kubeconfig YAML") from None
+    if not isinstance(raw, dict):
+        raise ConnectorError("Kubeconfig must be an object")
+    context = context or raw.get("current-context")
+    if not isinstance(context, str) or not context:
+        raise ConnectorError("Kubeconfig requires a current-context")
+
+    def entry(group, name, key):
+        rows = raw.get(group)
+        if not isinstance(rows, list) or len(rows) > 1000:
+            raise ConnectorError(f"Invalid kubeconfig {group}")
+        matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+        if len(matches) != 1 or not isinstance(matches[0].get(key), dict):
+            raise ConnectorError(f"Missing or ambiguous kubeconfig {key}")
+        return matches[0][key]
+
+    selected = entry("contexts", context, "context")
+    cluster = entry("clusters", selected.get("cluster"), "cluster")
+    user = entry("users", selected.get("user"), "user")
+    if cluster.get("insecure-skip-tls-verify"):
+        raise ConnectorError("Disabling Kubernetes TLS verification is forbidden")
+    if any(name in cluster for name in ("certificate-authority", "proxy-url", "tls-server-name")):
+        raise ConnectorError("External CA paths and proxy/TLS overrides are unsupported")
+    if any(name in user for name in ("exec", "auth-provider", "tokenFile", "token-file", "client-certificate", "client-key", "username", "password", "as", "as-groups", "as-user-extra")):
+        raise ConnectorError("Use self-contained token or certificate credentials; plugins and file references are forbidden")
+    token = _text(user.get("token", ""), "token", 65536)
+    if any(ch in token for ch in "\r\n"):
+        raise ConnectorError("Invalid token")
+    ca = _pem(cluster.get("certificate-authority-data"), "certificate-authority-data")
+    cert = _pem(user.get("client-certificate-data"), "client-certificate-data")
+    key = _pem(user.get("client-key-data"), "client-key-data")
+    if bool(cert) != bool(key) or not (token or (cert and key)):
+        raise ConnectorError("A token or complete client certificate/key pair is required")
+    config = {"server": _url(cluster.get("server"), https_only=True), "token": token,
+              "ca_pem": ca, "client_certificate": cert, "client_key": key, "context": context}
+    # Validate the trust material locally, before saving a broken connection.
+    with _tls(config):
+        pass
+    return config
+
+
+@contextmanager
+def _tls(settings):
+    try:
+        ca = settings.get("ca_pem") or None
+        context = ssl.create_default_context(cadata=ca)
+        cert, key = settings.get("client_certificate"), settings.get("client_key")
+        if cert or key:
+            if not cert or not key:
+                raise ConnectorError("Incomplete TLS client identity")
+            with tempfile.TemporaryDirectory(prefix="pulse-tls-") as directory:
+                paths = []
+                for name, content in (("cert.pem", cert), ("key.pem", key)):
+                    path = os.path.join(directory, name)
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, "w") as handle:
+                        handle.write(content)
+                    paths.append(path)
+                context.load_cert_chain(*paths)
+                yield context
+        else:
+            yield context
+    except (ssl.SSLError, OSError, TypeError):
+        raise ConnectorError("Invalid or inaccessible TLS certificate material") from None
+
+
+@contextmanager
+def _client(settings, *, timeout=10):
+    headers = {"Accept": "application/json"}
+    token = settings.get("token") or settings.get("api_key")
+    if token:
+        token = _text(token, "token", 65536)
+        if any(c in token for c in "\r\n"):
+            raise ConnectorError("Invalid authentication token")
+        headers["Authorization"] = f"Bearer {token}"
+    auth = None
+    if settings.get("username") and not token:
+        auth = httpx.BasicAuth(settings["username"], settings.get("password", ""))
+    with _tls(settings) as tls:
+        # trust_env=False avoids unintentional credential routing via ambient proxies.
+        with httpx.Client(verify=tls, timeout=timeout, follow_redirects=False,
+                          trust_env=False, headers=headers, auth=auth) as client:
+            yield client
+
+
+def _request(client, method, url, *, as_json=True, deadline=None, **kwargs):
+    try:
+        with client.stream(method, url, **kwargs) as response:
+            if not 200 <= response.status_code < 300:
+                raise ConnectorError(f"Upstream HTTP {response.status_code}")
+            chunks, total = [], 0
+            for chunk in response.iter_bytes():
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise ConnectorError("Collection time budget exceeded")
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise ConnectorError("Upstream response exceeds 16 MiB limit")
+                chunks.append(chunk)
+            body = b"".join(chunks)
+        if not as_json:
+            return body.decode("utf-8", errors="replace")
+        return json.loads(body)
+    except httpx.HTTPError:
+        raise ConnectorError("Upstream network/TLS request failed; check endpoint, trust and connectivity") from None
+    except (ValueError, UnicodeError) as exc:
+        if isinstance(exc, ConnectorError):
+            raise
+        raise ConnectorError("Upstream returned invalid JSON") from None
+
+
+def _sanitize(value, *, depth=0):
+    if depth > 40:
+        return "[depth limit]"
+    if isinstance(value, list):
+        return [_sanitize(item, depth=depth + 1) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if key in ("managedFields", "annotations"):
+            continue
+        if key in ("command", "args") and isinstance(item, list):
+            result[key] = ["[redacted]"]
+        elif key == "env" and isinstance(item, list):
+            result[key] = [{**_sanitize(v, depth=depth + 1), **({"value": "[redacted]"} if "value" in v else {})}
+                           for v in item if isinstance(v, dict)]
+        else:
+            result[key] = _sanitize(item, depth=depth + 1)
+    return result
+
+
+def collect_cluster(config: dict) -> dict:
+    base = _url(config.get("server"), https_only=True)
+    result = {"observed_at": datetime.now(timezone.utc).isoformat(), "resources": {}, "errors": [], "complete": True}
+    deadline = time.monotonic() + 45
+    with _client(config) as client:
+        for kind, path in RESOURCE_PATHS.items():
+            record = {"items": [], "error": None, "truncated": False}
+            result["resources"][kind] = record
+            cursor = ""
+            try:
+                for page in range(MAX_PAGES):
+                    if time.monotonic() >= deadline:
+                        raise ConnectorError("Collection time budget exceeded")
+                    params = {"limit": 500}
+                    if cursor:
+                        params["continue"] = cursor
+                    data = _request(client, "GET", base + path, params=params, deadline=deadline)
+                    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                        raise ConnectorError("Invalid Kubernetes list response")
+                    for item in data["items"]:
+                        if not isinstance(item, dict):
+                            raise ConnectorError("Invalid Kubernetes object")
+                        if kind == "configmaps":
+                            if any(not isinstance(item.get(k) or {}, dict) for k in ("data", "binaryData")):
+                                raise ConnectorError("Invalid ConfigMap data")
+                            item = {"apiVersion": item.get("apiVersion"), "kind": "ConfigMap",
+                                    "metadata": item.get("metadata", {}),
+                                    "keys": sorted(set((item.get("data") or {}).keys()) | set((item.get("binaryData") or {}).keys()))}
+                        record["items"].append(_sanitize(item))
+                    metadata = data.get("metadata") or {}
+                    if not isinstance(metadata, dict) or not isinstance(metadata.get("continue", ""), str):
+                        raise ConnectorError("Invalid Kubernetes pagination metadata")
+                    cursor = metadata.get("continue", "")
+                    if not cursor:
+                        break
+                record["truncated"] = bool(cursor)
+            except ConnectorError as exc:
+                record["error"] = str(exc)
+                result["errors"].append(f"{kind}: {exc}")
+            if record["error"] or record["truncated"]:
+                result["complete"] = False
+    return result
+
+
+def _name(value, field):
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", value):
+        raise ConnectorError(f"Invalid Kubernetes {field}")
+    return quote(value, safe="")
+
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Best-effort obvious credential redaction, not comprehensive DLP."""
+    text = re.sub(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----",
+                  "[private key redacted]", text, flags=re.DOTALL)
+    text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [redacted]", text)
+    text = re.sub(r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization)\b([\"']?\s*[:=]\s*)"
+                  r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1\2[redacted]", text)
+    text = re.sub(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", "[JWT redacted]", text)
+    return re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", text)
+
+
+def _redact_log_row(value):
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, list):
+        return [_redact_log_row(item) for item in value]
+    if isinstance(value, dict):
+        return {key: "[redacted]" if re.fullmatch(r"(?i)(?:password|passwd|token|secret|api[_-]?key|authorization)", str(key))
+                else _redact_log_row(item) for key, item in value.items()}
+    return value
+
+
+def resource_logs(config, namespace, pod, container=None, previous=False) -> str:
+    namespace, pod = _name(namespace, "namespace"), _name(pod, "pod")
+    params = {"tailLines": 500, "limitBytes": 262144, "timestamps": "true", "previous": "true" if previous else "false"}
+    if container:
+        params["container"] = _name(container, "container")
+    with _client(config) as client:
+        return redact_sensitive_text(_request(client, "GET", _url(config.get("server"), https_only=True)
+                        + f"/api/v1/namespaces/{namespace}/pods/{pod}/log", params=params, as_json=False))
+
+
+METRIC_EXPRESSIONS = {
+    "cpu": "sum by (namespace,pod) (rate(container_cpu_usage_seconds_total{scope}[5m]))",
+    "memory": "sum by (namespace,pod) (container_memory_working_set_bytes{scope})",
+    "node_cpu": "sum by (instance) (rate(node_cpu_seconds_total{scope}[5m]))",
+    "node_memory": "node_memory_MemAvailable_bytes{scope}",
+    "filesystem": "node_filesystem_avail_bytes{scope}",
+    "pvc_used": "kubelet_volume_stats_used_bytes{scope}",
+    "pvc_capacity": "kubelet_volume_stats_capacity_bytes{scope}",
+}
+
+
+def query_metrics(settings: dict, query: str) -> dict:
+    if query not in METRIC_EXPRESSIONS:
+        raise ConnectorError("Unknown metric; arbitrary PromQL is not permitted")
+    labels = settings.get("labels") or {}
+    if not isinstance(labels, dict) or len(labels) > 16:
+        raise ConnectorError("Invalid metric cluster labels")
+    if not labels and settings.get("mode") != "dedicated":
+        raise ConnectorError("Shared metrics require explicit cluster labels")
+    selectors = []
+    for name, value in labels.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name) or not isinstance(value, str):
+            raise ConnectorError("Invalid metric label")
+        selectors.append(f"{name}={json.dumps(value, ensure_ascii=True)}")
+    if query == "node_cpu":
+        if "mode" in labels:
+            raise ConnectorError("The mode label is reserved for node CPU selection")
+        selectors.append('mode!="idle"')
+    expr = METRIC_EXPRESSIONS[query].replace("{scope}", "{" + ",".join(selectors) + "}")
+    with _client(settings) as client:
+        data = _request(client, "GET", _url(settings.get("url")) + "/api/v1/query", params={"query": expr})
+    if not isinstance(data, dict) or data.get("status") != "success" or not isinstance(data.get("data"), dict):
+        raise ConnectorError("Metrics API returned an error or invalid response")
+    return {"metric": query, "data": data["data"], "empty": not bool(data["data"].get("result")), "query": expr}
+
+
+def _field(row, path):
+    if path in row:
+        return row[path]
+    value = row
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = None) -> dict:
+    """Astra HTTP adapter; validate payload against the installed Astra Swagger."""
+    _name(namespace, "namespace")
+    _name(pod, "pod")
+    fields = [settings.get("cluster_field", "labels.cluster"),
+              settings.get("namespace_field", "labels.k8s.namespace.name"),
+              settings.get("pod_field", "labels.k8s.pod.name")]
+    if any(not isinstance(f, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", f) for f in fields):
+        raise ConnectorError("Invalid Astra field mapping")
+    cluster = settings.get("cluster_value")
+    if not isinstance(cluster, str) or not cluster:
+        raise ConnectorError("Astra requires an explicit cluster value")
+    if not settings.get("token"):
+        raise ConnectorError("Astra adapter requires a service bearer token; password login is not implemented")
+    now = datetime.now(timezone.utc)
+    if start is not None:
+        try:
+            parsed = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError()
+        except (ValueError, AttributeError):
+            raise ConnectorError("Astra start must be an ISO timestamp with timezone") from None
+    else:
+        start = (now - timedelta(hours=1)).isoformat()
+    expected = [cluster, namespace, pod]
+    rows, scanned, truncated = [], 0, False
+    with _client(settings) as client:
+        for page in range(MAX_PAGES):
+            payload = {"time": {"from": start, "to": now.isoformat()},
+                       "query": " AND ".join(f"{field}:{json.dumps(value)}" for field, value in zip(fields, expected)),
+                       "paging": {"page": page, "size": 250}}
+            data = _request(client, "POST", _url(settings.get("url")) + "/api/v1/logs/search/monitorLogs", json=payload)
+            source = data.get("data", data) if isinstance(data, dict) else data
+            if isinstance(source, dict):
+                source = next((source[k] for k in ("items", "logs", "records", "content") if isinstance(source.get(k), list)), None)
+            if not isinstance(source, list):
+                raise ConnectorError("Unsupported Astra response; compare the installed Swagger contract")
+            scanned += len(source)
+            rows.extend(row for row in source if isinstance(row, dict)
+                        and all(_field(row, field) == value for field, value in zip(fields, expected)))
+            if len(source) < 250:
+                break
+            truncated = page == MAX_PAGES - 1
+    return {"items": [_redact_log_row(row) for row in rows[:1000]], "scanned": scanned, "truncated": truncated,
+            "notice": "Astra adapter contract must be validated for your server version"}
+
+
+def llm_chat(settings: dict, messages: list) -> str:
+    if not isinstance(messages, list) or not messages or len(messages) > 60:
+        raise ConnectorError("Invalid LLM conversation")
+    clean = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
+            raise ConnectorError("Unsupported LLM message")
+        clean.append({"role": message["role"], "content": _text(message.get("content"), "message", 100000)})
+    if sum(len(m["content"]) for m in clean) > 150000:
+        raise ConnectorError("LLM context exceeds the configured application limit")
+    model = _text(settings.get("model"), "model", 200)
+    if not model:
+        raise ConnectorError("LLM model is required")
+    base = _url(settings.get("url"))
+    if not base.endswith("/v1"):
+        base += "/v1"
+    with _client(settings, timeout=httpx.Timeout(90, connect=10)) as client:
+        response = _request(client, "POST", base + "/chat/completions", json={
+            "model": model, "messages": clean, "max_tokens": 1800, "temperature": 0.1,
+            "stream": False,
+        })
+    try:
+        result = response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise ConnectorError("LLM returned an unsupported completion response") from None
+    if not isinstance(result, str) or not result.strip():
+        raise ConnectorError("LLM returned no text; tools and autonomous actions are not enabled")
+    return result

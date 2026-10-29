@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Pulse Clusters installer and lifecycle CLI. Python standard library only."""
+from __future__ import annotations
+import argparse
+import base64
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent
+
+
+def load_env(runtime: Path) -> dict:
+    values = {}
+    path = runtime / '.env'
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                values[key] = value
+    return values
+
+
+def initialize(runtime: Path, port: int = 8090) -> None:
+    if not 1024 <= port <= 65535:
+        raise ValueError('Port must be between 1024 and 65535')
+    existed = runtime.exists()
+    runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
+    uid = 65532 if os.getuid() == 0 else os.getuid()
+    gid = 65532 if os.getuid() == 0 else os.getgid()
+    old = load_env(runtime)
+    uid, gid = int(old.get('PULSE_UID', uid)), int(old.get('PULSE_GID', gid))
+    for directory in (runtime, runtime / 'secrets', runtime / 'data'):
+        directory.mkdir(exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+        if os.getuid() == 0:
+            os.chown(directory, uid, gid)
+    files = {
+        runtime / '.env': f'PULSE_PORT={port}\nPULSE_UID={uid}\nPULSE_GID={gid}\nPULSE_USERNAME=pulse\n',
+        runtime / 'secrets' / 'portal-password': secrets.token_urlsafe(32) + '\n',
+        runtime / 'registry.key': base64.urlsafe_b64encode(secrets.token_bytes(32)).decode() + '\n',
+    }
+    for path, content in files.items():
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(content)
+        if os.getuid() == 0:
+            os.chown(path, uid, gid)
+    print(f'Runtime {"preserved" if existed else "initialized"}: {runtime}')
+    print(f'Password is stored in {runtime / "secrets/portal-password"}; existing values are never replaced.')
+
+
+def compose_command(runtime: Path) -> list[str]:
+    if not (runtime / '.env').is_file():
+        raise ValueError('Run ./pulse init first')
+    port = load_env(runtime).get('PULSE_PORT', '8090')
+    return ['docker', 'compose', '--env-file', str(runtime / '.env'), '--project-name', f'pulse-clusters-{port}', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.yaml')]
+
+
+def compose(runtime: Path, args: list[str], capture=False):
+    env = dict(os.environ, **load_env(runtime))
+    env['PULSE_RUNTIME_HOST'] = str(runtime)
+    return subprocess.run(compose_command(runtime) + args, env=env, check=True, text=True, capture_output=capture)
+
+
+def running(runtime: Path) -> bool:
+    return bool(compose(runtime, ['ps', '--status', 'running', '-q', 'pulse'], capture=True).stdout.strip())
+
+
+@contextlib.contextmanager
+def exclusive_runtime(runtime: Path):
+    """Coordinate with app single-controller lock, including local dev servers."""
+    lock_path = runtime / 'controller.lock'
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    if os.getuid() == 0:
+        owner = runtime.stat()
+        os.fchown(fd, owner.st_uid, owner.st_gid)
+    with os.fdopen(fd, 'a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('Runtime is used by a running process; stop ./pulse dev before backup/restore') from None
+        yield
+
+
+def check_databases(directory: Path):
+    for path in directory.rglob('*'):
+        if path.is_file() and path.suffix in ('.db', '.sqlite', '.sqlite3'):
+            conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+            try:
+                result = conn.execute('PRAGMA integrity_check').fetchall()
+                if result != [('ok',)]:
+                    raise ValueError(f'Database integrity check failed: {path.name}')
+            finally:
+                conn.close()
+
+
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def make_backup(runtime: Path, target: Path) -> Path:
+    runtime = runtime.resolve()
+    target = target.resolve()
+    if target == runtime or runtime in target.parents:
+        raise ValueError('Backup destination must be outside runtime')
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    output = target / f'pulse-{stamp}.tar.gz'
+    with exclusive_runtime(runtime):
+        check_databases(runtime)
+        for path in runtime.rglob('*'):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise ValueError('Runtime contains links or special files; backup refused')
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as raw:
+            with tarfile.open(fileobj=raw, mode='w:gz') as archive:
+                archive.add(runtime, arcname='runtime', filter=lambda info: None if info.name == 'runtime/controller.lock' else info)
+    digest = file_hash(output)
+    checksum = Path(str(output) + '.sha256')
+    checksum.write_text(f'{digest}  {output.name}\n')
+    checksum.chmod(0o600)
+    print(f'Backup: {output}; contains credentials: keep in protected storage')
+    return output
+
+
+def restore_backup(runtime: Path, source: Path) -> Path | None:
+    source = source.resolve()
+    checksum = Path(str(source) + '.sha256')
+    expected = checksum.read_text().split()[0]
+    actual = file_hash(source)
+    if len(expected) != 64 or not secrets.compare_digest(actual, expected):
+        raise ValueError('Backup SHA256 mismatch')
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.pulse-restore-', dir=runtime.parent) as staging:
+        stage = Path(staging)
+        with tarfile.open(source, 'r:gz') as archive:
+            members = archive.getmembers()
+            if not members or len(members) > 100000:
+                raise ValueError('Invalid backup member count')
+            size = 0
+            seen = set()
+            for member in members:
+                path = Path(member.name)
+                if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] != 'runtime' or '\\' in member.name:
+                    raise ValueError('Unsafe backup path')
+                normalized = str(path)
+                if not (member.isdir() or member.isfile()) or normalized in seen:
+                    raise ValueError('Links, special or duplicate files are not permitted')
+                if member.mode & 0o7000:
+                    raise ValueError('Unsafe backup mode')
+                seen.add(normalized)
+                size += member.size
+            if size > 20 * 1024**3:
+                raise ValueError('Backup expands beyond 20 GiB limit')
+            if shutil.disk_usage(stage).free < size * 1.1:
+                raise ValueError('Not enough disk space to restore')
+            archive.extractall(stage, members=members, filter='data')
+        candidate = stage / 'runtime'
+        for required in ('.env', 'secrets/portal-password', 'registry.key'):
+            if not (candidate / required).is_file():
+                raise ValueError(f'Backup missing required file: {required}')
+        check_databases(candidate)
+        preserved = None
+        if runtime.exists():
+            with exclusive_runtime(runtime):
+                stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                preserved = runtime.with_name('runtime.before-' + stamp)
+                runtime.rename(preserved)
+                try:
+                    candidate.rename(runtime)
+                except Exception:
+                    preserved.rename(runtime)
+                    raise
+        else:
+            candidate.rename(runtime)
+        cfg = load_env(runtime)
+        uid, gid = int(cfg.get('PULSE_UID', os.getuid())), int(cfg.get('PULSE_GID', os.getgid()))
+        for path in [runtime, *runtime.rglob('*')]:
+            path.chmod(0o700 if path.is_dir() else 0o600)
+            if os.getuid() == 0:
+                os.chown(path, uid, gid)
+        print(f'Restored to {runtime}; previous runtime: {preserved or "none"}')
+        return preserved
+
+
+def health_check(runtime: Path):
+    settings = load_env(runtime)
+    port = settings.get('PULSE_PORT', '8090')
+    username = settings.get('PULSE_USERNAME', 'pulse')
+    password = (runtime / 'secrets/portal-password').read_text().strip()
+    credentials = base64.b64encode(f'{username}:{password}'.encode()).decode()
+    for endpoint in ('/healthz', '/api/overview'):
+        request = urllib.request.Request(f'http://127.0.0.1:{port}{endpoint}', headers={'Authorization': 'Basic ' + credentials})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.load(response)
+        print(endpoint, json.dumps(data, ensure_ascii=False))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Pulse Clusters 0.6.0 lifecycle')
+    parser.add_argument('--runtime', type=Path, default=Path(os.environ.get('PULSE_RUNTIME', ROOT / 'runtime')))
+    sub = parser.add_subparsers(dest='command', required=True)
+    init = sub.add_parser('init'); init.add_argument('--port', type=int, default=8090)
+    for name in ('start', 'start-offline', 'stop', 'status', 'logs', 'build', 'dev', 'check'):
+        sub.add_parser(name)
+    backup = sub.add_parser('backup'); backup.add_argument('--output-dir', type=Path, default=ROOT / 'backups')
+    restore = sub.add_parser('restore'); restore.add_argument('archive', type=Path); restore.add_argument('--confirm-restore', action='store_true')
+    export = sub.add_parser('export-image'); export.add_argument('output', type=Path)
+    args = parser.parse_args(argv)
+    runtime = args.runtime.resolve()
+    try:
+        if args.command == 'init':
+            initialize(runtime, args.port)
+        elif args.command in ('start', 'start-offline'):
+            compose(runtime, ['up', '-d', '--wait', '--wait-timeout', '120', *(['--build'] if args.command == 'start' else ['--no-build', '--pull', 'never'])])
+        elif args.command in ('stop', 'status', 'logs', 'build'):
+            compose(runtime, {'stop': ['stop'], 'status': ['ps'], 'logs': ['logs', '--tail', '100'], 'build': ['build']}[args.command])
+        elif args.command == 'dev':
+            cfg = load_env(runtime)
+            if not cfg:
+                raise ValueError('Run ./pulse init first')
+            env = dict(os.environ, PULSE_RUNTIME=str(runtime), PULSE_PASSWORD_FILE=str(runtime / 'secrets/portal-password'), PULSE_USERNAME=cfg.get('PULSE_USERNAME', 'pulse'))
+            interpreter = ROOT / '.venv/bin/python'
+            os.chdir(ROOT)
+            os.execve(str(interpreter) if interpreter.exists() else sys.executable, [str(interpreter) if interpreter.exists() else sys.executable, '-m', 'uvicorn', 'pulse_app.app:app', '--host', '127.0.0.1', '--port', cfg.get('PULSE_PORT', '8090')], env)
+        elif args.command == 'check':
+            health_check(runtime)
+        elif args.command == 'export-image':
+            output = args.output.resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists():
+                raise ValueError('Output file exists')
+            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.6.0'], check=True)
+            Path(str(output) + '.sha256').write_text(f'{file_hash(output)}  {output.name}\n')
+        elif args.command in ('backup', 'restore'):
+            if args.command == 'restore' and not args.confirm_restore:
+                raise ValueError('Restore requires --confirm-restore')
+            was_running = running(runtime)
+            if was_running:
+                compose(runtime, ['stop', 'pulse'])
+            succeeded = False
+            try:
+                if args.command == 'backup':
+                    make_backup(runtime, args.output_dir)
+                else:
+                    restore_backup(runtime, args.archive)
+                succeeded = True
+            finally:
+                if was_running and (args.command == 'backup' or not succeeded):
+                    compose(runtime, ['up', '-d', '--no-build', '--pull', 'never', '--wait'])
+            if args.command == 'restore':
+                print('Restored runtime remains stopped. Run ./pulse start-offline and ./pulse check.')
+    except (ValueError, OSError, subprocess.CalledProcessError, tarfile.TarError, sqlite3.Error) as exc:
+        print(f'Error: {exc}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
