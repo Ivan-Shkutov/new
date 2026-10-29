@@ -65,6 +65,8 @@ ssh -N -L 18090:127.0.0.1:8090 dito@10.129.160.10
 
 Тогда адрес браузера: http://127.0.0.1:18090. Не открывайте наружу HTTP-порт панели; для постоянного общего доступа нужен HTTPS reverse proxy.
 
+Подробная последовательность подключения и приёмки: [CONNECT-CLUSTER-RU](docs/CONNECT-CLUSTER-RU.md). Для исходного архива 0.6.1 там приведена поправка RBAC.
+
 ## 5. Добавить Kubernetes
 
 На машине с административным kubectl выполните команды из [раздела 3 INSTALL-RU](docs/INSTALL-RU.md#3-kubernetes): примените `deploy/rbac-readonly.yaml`, проверьте права и создайте kubeconfig скриптом `scripts/export-kubeconfig.py`.

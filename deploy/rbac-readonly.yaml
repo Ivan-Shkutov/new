@@ -15,7 +15,7 @@ metadata:
   name: pulse-reader
 rules:
   - apiGroups: [""]
-    resources: [nodes, pods, namespaces, services, endpoints, configmaps, persistentvolumeclaims, persistentvolumes, events, serviceaccounts]
+    resources: [nodes, pods, namespaces, services, endpoints, configmaps, persistentvolumeclaims, persistentvolumes, events, serviceaccounts, replicationcontrollers]
     verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [pods/log]
@@ -31,6 +31,9 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [storage.k8s.io]
     resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
     verbs: [get, list, watch]
   - apiGroups: [autoscaling]
     resources: [horizontalpodautoscalers]
