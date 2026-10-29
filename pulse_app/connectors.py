@@ -414,3 +414,80 @@ def llm_chat(settings: dict, messages: list) -> str:
     if not isinstance(result, str) or not result.strip():
         raise ConnectorError("LLM returned no text; tools and autonomous actions are not enabled")
     return result
+
+
+# Ratios are computed by the source across series, never by averaging node percentages.
+# max by(instance, ...) removes duplicate scrape jobs while retaining physical identities.
+def utilization_expressions(settings):
+    labels = settings.get('labels') or {}
+    if not isinstance(labels, dict) or len(labels) > 16:
+        raise ConnectorError('Invalid metric cluster labels')
+    if not labels and settings.get('mode') != 'dedicated':
+        raise ConnectorError('Shared metrics require explicit cluster labels')
+    selectors = []
+    for name, value in labels.items():
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) or not isinstance(value, str):
+            raise ConnectorError('Invalid metric label')
+        if name in ('mode', 'cpu', 'instance', 'mountpoint', 'fstype'):
+            raise ConnectorError('Cluster scope labels must not select individual CPUs, nodes or filesystems')
+        selectors.append(f'{name}={json.dumps(value)}')
+    def scope(*extra):
+        return '{' + ','.join(selectors + list(extra)) + '}'
+    cpu = 'max by(instance,cpu,mode)(rate(node_cpu_seconds_total' + scope('mode!~"guest.*"') + '[5m]))'
+    idle = 'max by(instance,cpu,mode)(rate(node_cpu_seconds_total' + scope('mode="idle"') + '[5m]))'
+    mem_total = 'max by(instance)(node_memory_MemTotal_bytes' + scope() + ')'
+    mem_avail = 'max by(instance)(node_memory_MemAvailable_bytes' + scope() + ')'
+    fs = scope('mountpoint="/"', 'fstype!~"tmpfs|overlay|squashfs|ramfs"')
+    disk_total = 'max by(instance)(node_filesystem_size_bytes' + fs + ')'
+    disk_avail = 'max by(instance)(node_filesystem_avail_bytes' + fs + ')'
+    return {
+        'cpu': f'100 * (1 - sum({idle}) / sum({cpu}))',
+        'ram': f'100 * (1 - sum({mem_avail} and on(instance) {mem_total}) / sum({mem_total} and on(instance) {mem_avail}))',
+        'disk': f'100 * (1 - sum({disk_avail} and on(instance) {disk_total}) / sum({disk_total} and on(instance) {disk_avail}))',
+    }
+
+
+def dashboard_metrics(settings, window='1h'):
+    """Three cluster ratios and bounded history; source timestamps are preserved."""
+    import math
+    from concurrent.futures import ThreadPoolExecutor
+    windows = {'1h':3600, '6h':21600, '24h':86400}
+    if window not in windows:
+        raise ConnectorError('Unsupported history window')
+    expressions = utilization_expressions(settings)
+    end = int(time.time())
+    start, step = end - windows[window], max(30, windows[window] // 120)
+    def read(metric):
+        base_result = {'percent':None,'observed_at':None,'history':[],'error':None,'history_error':None}
+        with _client(settings) as client:
+            endpoint = _url(settings.get('url')) + '/api/v1/'
+            for history in (False, True):
+                params = {'query':expressions[metric]}
+                if history:
+                    params.update(start=start, end=end, step=step)
+                try:
+                    reply = _request(client,'GET',endpoint+('query_range' if history else 'query'),params=params)
+                    data = reply.get('data', {})
+                    expected = 'matrix' if history else 'vector'
+                    if reply.get('status') != 'success' or data.get('resultType') != expected:
+                        raise ConnectorError('Invalid metrics API response')
+                    series = data.get('result', [])
+                    if len(series) > 1:
+                        raise ConnectorError('Expected one cluster aggregate')
+                    values = series[0].get('values', []) if history and series else [series[0]['value']] if series else []
+                    points = []
+                    for ts, value in values:
+                        n, timestamp = float(value), float(ts)
+                        if math.isfinite(n) and math.isfinite(timestamp) and 0 <= n <= 100 and start-step <= timestamp <= end+step:
+                            points.append([timestamp, round(n, 2)])
+                    if history:
+                        base_result['history'] = points[:122]
+                    elif points:
+                        base_result['observed_at'], base_result['percent'] = points[-1]
+                except (ConnectorError, ValueError, TypeError, KeyError):
+                    base_result['history_error' if history else 'error'] = 'Не удалось получить историю метрик' if history else 'Источник не вернул корректную метрику'
+        return metric, base_result
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        results = dict(executor.map(read, ('cpu','ram','disk')))
+    return {'window':window,'start':start,'end':end,'step':step,'metrics':results,
+            'note':'Node exporter: CPU non-idle; RAM = total − available; диски = корневая ФС /, total − available. Покрытие зависит от scrape и меток.'}

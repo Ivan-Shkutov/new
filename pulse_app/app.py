@@ -182,6 +182,52 @@ def create_app(runtime=None, polling=True):
         cfg = row['config']
         return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': bool(cfg.get('metrics', {}).get('url')), 'has_astra': bool(cfg.get('astra', {}).get('url'))}
 
+    from . import dashboard
+    metric_cache = {}
+    metric_cache_lock = threading.Lock()
+
+    @api.get('/dashboard')
+    def dashboard_route(cluster_id: str=''):
+        if cluster_id:
+            cluster(cluster_id)
+        rows = overview()['clusters']
+        selected = [row for row in rows if not cluster_id or row['id'] == cluster_id]
+        summaries = []
+        for row in selected:
+            summary = dashboard.summarize(snapshot(row['id']), row['id'], row['name'], interval)
+            summaries.append(summary)
+            row.update(summary)
+            cfg = cluster(row['id'])['config']
+            row['sources'] = {'metrics':bool(cfg.get('metrics',{}).get('url')), 'astra':bool(cfg.get('astra',{}).get('url'))}
+        return {'version':__version__, 'clusters':selected, 'workloads':dashboard.combine(summaries),
+                'issues':[issue for summary in summaries for issue in summary['issues']][:40],
+                'issues_total':sum(summary['issues_total'] for summary in summaries),
+                'llm_configured':bool(db().settings().get('llm',{}).get('model'))}
+
+    @api.get('/clusters/{cid}/dashboard-metrics')
+    def dashboard_metric_route(cid: str, window: str='1h'):
+        import time
+        if window not in ('1h','6h','24h'):
+            raise HTTPException(422, 'Допустимые интервалы: 1h, 6h, 24h')
+        item = cluster(cid)
+        cfg = item['config'].get('metrics', {})
+        if not cfg.get('url'):
+            return {'configured':False, 'metrics':{}, 'note':'Подключите Prometheus / VictoriaMetrics в настройках кластера'}
+        key = (cid, hashlib.sha256(json.dumps(cfg,sort_keys=True).encode()).hexdigest(), window)
+        with metric_cache_lock:
+            cached = metric_cache.get(key)
+            if cached and time.monotonic()-cached[0] < 30:
+                return cached[1]
+        try:
+            result = {'configured':True, **connectors.dashboard_metrics(cfg,window)}
+        except connectors.ConnectorError as e:
+            result = {'configured':True,'metrics':{},'error':str(e)}
+        with metric_cache_lock:
+            if len(metric_cache) >= 60:
+                metric_cache.clear()
+            metric_cache[key] = (time.monotonic(), result)
+        return result
+
     @api.get('/clusters')
     def clusters():
         return {'items': [public_cluster(cluster(r['id'])) for r in db().rows('SELECT id FROM clusters ORDER BY name')]}

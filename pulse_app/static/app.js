@@ -32,7 +32,7 @@ function statusChip(status, enabled = true) {
   if (['ok', 'healthy', 'ready', 'fresh', 'success', 'completed', 'done', 'resolved'].includes(normalized)) return node('span', 'chip good', {completed: 'Завершено', done: 'Завершено', resolved: 'Подтверждено'}[normalized] || 'Данные получены');
   if (['error', 'failed', 'unreachable'].includes(normalized)) return node('span', 'chip bad', 'Ошибка');
   if (['running', 'pending', 'queued'].includes(normalized)) return node('span', 'chip warning', {running: 'Выполняется', pending: 'Ожидание', queued: 'В очереди'}[normalized]);
-  return node('span', 'chip warning', {stale: 'Устаревший снимок', partial: 'Неполные данные', unknown: 'Нет данных', collecting: 'Сбор данных'}[normalized] || status || 'Нет данных');
+  return node('span', 'chip warning', {stale: 'Устаревший снимок', partial: 'Неполные данные', degraded: 'Неполные данные', unknown: 'Нет данных', collecting: 'Сбор данных'}[normalized] || status || 'Нет данных');
 }
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
@@ -91,29 +91,89 @@ async function loadPage() {
     else if (state.page === 'settings') await loadSettings();
   } catch (error) { if (sequence === state.loadSequence) globalError(error); }
 }
-async function loadOverview() {
-  const target = $('#overview-content');
-  const data = await api('/overview'); state.overview = data.clusters || []; $('#version').textContent = data.version || '0.6.1'; clear(target);
-  const clusters = state.cluster ? state.overview.filter(item => item.id === state.cluster) : state.overview;
-  if (!clusters.length) { target.append(empty('Подключите первый кластер', 'Pulse собирает факты из Kubernetes, сопоставляет их с метриками и помогает расследовать проблемы. Начните с подключения только для чтения.', button('+ Добавить кластер', () => openCluster(), ''))); return; }
-  const stats = node('div', 'grid stats');
-  const total = key => clusters.some(item => item.observed_at && item.counts?.[key] !== undefined) ? clusters.reduce((sum, item) => sum + (item.observed_at ? Number(item.counts?.[key]) || 0 : 0), 0) : '—';
-  [['Кластеры', clusters.length, `${clusters.filter(item => item.enabled).length} со включённым сбором`], ['Узлы', total('nodes'), 'По последним снимкам'], ['Pods', total('pods'), 'Running не означает Ready'], ['Namespaces', total('namespaces'), 'Наблюдаемая область']].forEach(([title, value, hint]) => stats.append(append(node('div', 'stat'), node('span', '', title), node('strong', '', value), node('small', '', hint))));
-  target.append(stats);
-  target.append(append(node('div', 'section-heading'), node('h2', '', 'Подключённые кластеры'), button('+ Добавить кластер', () => openCluster(), 'secondary')));
-  const cards = node('div', 'grid cluster-grid');
-  clusters.forEach(cluster => {
-    const card = node('article', 'cluster-card'); card.dataset.testid = 'cluster-card';
-    const title = append(node('div'), node('h3', '', cluster.name), node('span', 'identifier', cluster.id));
-    card.append(append(node('div', 'card-heading'), title, statusChip(cluster.status, cluster.enabled)));
-    const counts = node('div', 'counts'); ['nodes', 'pods', 'namespaces'].forEach(key => counts.append(append(node('div'), node('strong', '', cluster.observed_at ? (cluster.counts?.[key] ?? '—') : '—'), node('span', '', typeNames[key])))); card.append(counts);
-    if (cluster.error) notice(card, cluster.error, 'error');
-    card.append(append(node('div', 'card-bottom'), node('span', '', date(cluster.observed_at)), button('Ресурсы →', () => { setCluster(cluster.id); location.hash = 'resources'; if (state.page === 'resources') loadPage(); })));
-    cards.append(card);
-  });
-  target.append(cards);
-  target.append(node('p', 'inline-help', 'Количество объектов относится к последнему доступному снимку. Проверяйте время наблюдения и полноту источников перед выводами.'));
+const workloadNames = {daemonsets:'DaemonSets',deployments:'Deployments',jobs:'Jobs',cronjobs:'CronJobs',replicasets:'ReplicaSets',statefulsets:'StatefulSets',pods:'Pods'};
+let metricWindow = '1h';
+function resourceView(cid, kind='pods') { setCluster(cid); $('#resource-type').value=kind; location.hash='resources'; if(state.page==='resources') loadPage(); }
+function donut(percent, caption, tone='') {
+  const box=node('div',`donut ${tone}`), svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox','0 0 120 120'); svg.setAttribute('aria-hidden','true');
+  const known=Number.isFinite(percent);
+  for(const [cls,offset] of [['donut-track',0],['donut-value',known?339.292*(1-Math.min(100,Math.max(0,percent))/100):339.292]]) {
+    const circle=document.createElementNS(svg.namespaceURI,'circle');
+    for(const [k,v] of Object.entries({cx:60,cy:60,r:54,fill:'none','stroke-width':9,class:cls})) circle.setAttribute(k,v);
+    if(cls==='donut-value'){circle.setAttribute('stroke-dasharray','339.292');circle.setAttribute('stroke-dashoffset',String(offset));}svg.append(circle);
+  }
+  box.setAttribute('role','img');box.setAttribute('aria-label',`${caption}: ${known?percent.toFixed(1)+'%':'нет данных'}`);
+  box.append(svg,node('strong','donut-number',known?`${Math.round(percent)}%`:'—'));return box;
 }
+function workloadCard(kind, value, clusters) {
+  const card=node('article','workload-card'), known=value?.total!==null && value?.total!==undefined;
+  card.dataset.testid=`workload-${kind}`;
+  card.append(append(node('div','workload-title'),node('h3','',workloadNames[kind]),node('span','metadata',known?`${value.positive} / ${value.total} ${value.label}`:'Нет данных')),
+    donut(value?.percent,workloadNames[kind],value?.percent!==null&&value?.percent<100?'amber':''));
+  const foot=node('div','workload-foot');
+  if(known && !value.total) foot.append(node('small','muted','Объектов нет'));
+  if(value?.partial) foot.append(node('small','warning-text','Выборка неполная'));
+  if(value?.stale) foot.append(node('small','warning-text','Проверьте время снимка'));
+  if(value?.states) foot.append(node('small','muted',Object.entries(value.states).map(([k,v])=>`${k}: ${v}`).join(' · ')));
+  if(clusters.length===1) foot.append(button('Ресурсы →',()=>resourceView(clusters[0].id,kind)));
+  card.append(foot);return card;
+}
+async function loadOverview() {
+  const target=$('#overview-content'), selected=state.cluster;
+  const data=await api('/dashboard'+(selected?`?cluster_id=${encodeURIComponent(selected)}`:''));
+  if(selected!==state.cluster || state.page!=='overview')return;
+  state.overview=data.clusters||[];$('#version').textContent=data.version;clear(target);
+  const clusters=state.overview;
+  if(!clusters.length){target.append(empty('Подключите первый кластер','Добавьте подключение Kubernetes с правами чтения.',button('+ Добавить кластер',()=>openCluster(),'')));return;}
+  const total=key=>{const rows=clusters.filter(c=>Number.isFinite(c.counts?.[key]));return rows.length?rows.reduce((n,c)=>n+c.counts[key],0):'—';};
+  const stats=node('div','grid stats');
+  for(const [label,value,hint] of [['Кластеры',clusters.length,selected?currentClusterName():'Все подключения'],['Узлы',total('nodes'),'По доступным снимкам'],['Pods',total('pods'),'Running ≠ Ready'],['Namespaces',total('namespaces'),'Область выбранных кластеров']]) stats.append(append(node('div','stat'),node('span','',label),node('strong','',value),node('small','',hint)));
+  target.append(stats);
+  const map=node('div','panel cluster-map');map.append(append(node('div','section-heading'),node('h2','','Карта кластеров'),button('+ Добавить кластер',()=>openCluster())));
+  const table=node('table'),thead=node('thead'),tr=node('tr');['Кластер','Сбор данных','Nodes / Pods','Наблюдение','Источники',''].forEach(t=>tr.append(node('th','',t)));thead.append(tr);table.append(thead);
+  const body=node('tbody');clusters.forEach(c=>{const r=node('tr');r.append(node('td','',c.name),append(node('td'),statusChip(c.status,c.enabled)),node('td','',`${c.counts.nodes??'—'} / ${c.counts.pods??'—'}`),node('td','',date(c.observed_at)),node('td','',`Kubernetes · метрики ${c.sources.metrics?'настроены':'—'} · Astra ${c.sources.astra?'настроена':'—'}`),append(node('td'),button('Открыть',()=>{setCluster(c.id);loadPage();})));body.append(r);});table.append(body);map.append(append(node('div','table-wrap'),table));target.append(map);
+  const metricHeading=node('div','section-heading');metricHeading.append(node('h2','','Утилизация ресурсов'));
+  const range=node('select');range.setAttribute('aria-label','Интервал графиков');range.className='range-select';for(const [v,t] of [['1h','1 час'],['6h','6 часов'],['24h','24 часа']])range.append(new Option(t,v));range.value=metricWindow;
+  range.addEventListener('change',()=>{metricWindow=range.value;loadPage();});metricHeading.append(range);target.append(metricHeading);
+  const metricTarget=node('div');metricTarget.id='dashboard-metrics';target.append(metricTarget);
+  const metricCid=selected||(clusters.length===1?clusters[0].id:null);
+  if(!metricCid)notice(metricTarget,'Выберите кластер слева для утилизации и графиков. Проценты разных кластеров не усредняются.');
+  else {notice(metricTarget,'Получение метрик…');api(`/clusters/${encodeURIComponent(metricCid)}/dashboard-metrics?window=${metricWindow}`).then(result=>{if(metricTarget.isConnected&&selected===state.cluster)renderDashboardMetrics(metricTarget,result);}).catch(e=>{if(metricTarget.isConnected)notice(clear(metricTarget),errorText(e),'error');});}
+  target.append(append(node('div','section-heading'),node('h2','','Состояние workloads')));
+  target.append(node('p','inline-help','Процент объектов Ready / завершённых Jobs / включённых CronJobs. Пустой набор не означает 100%.'));
+  const cards=node('div','workload-grid');for(const kind of Object.keys(workloadNames))cards.append(workloadCard(kind,data.workloads[kind],clusters));target.append(cards);
+  const bottom=node('div','overview-bottom'),issues=node('div','panel');issues.append(node('h2','',`Требует проверки · ${data.issues_total}`));
+  if(!data.issues.length)notice(issues,'В доступном снимке нет отмеченных состояний. Проверьте полноту и свежесть данных.');
+  for(const issue of data.issues){const row=node('div','issue-row');row.append(append(node('div'),node('strong','',issue.name),node('small','muted',`${issue.cluster_name} · ${issue.namespace||issue.kind} · ${issue.state}${issue.stale?' · старый снимок':''}`)));row.append(button(issue.kind==='pods'?'Почему?':'Ресурс',()=>{if(issue.kind!=='pods'){resourceView(issue.cluster_id,issue.kind);return;}setCluster(issue.cluster_id);const form=$('#investigation-form');form.elements.namespace.value=issue.namespace;form.elements.pod.value=issue.name;form.elements.question.value=`Объясни состояние Pod ${issue.name}. Укажи наблюдения, гипотезы и безопасные проверки.`;location.hash='investigations';}));issues.append(row);}
+  const sources=node('div','panel');sources.append(node('h2','','Источники и диагностика'),node('p','muted','Статус сбора API не означает, что все приложения исправны.'));
+  for(const c of clusters){sources.append(node('h3','',c.name));if(c.error)notice(sources,c.error,'warning');sources.append(node('p','',`Метрики: ${c.sources.metrics?'настроены':'не подключены'} · Astra: ${c.sources.astra?'настроена':'не подключена'}`));}
+  sources.append(node('p','',`Локальная LLM: ${data.llm_configured?'настроена — проверьте анализ конкретного Pod':'укажите URL и Model ID в настройках'}`),button('Настройки источников',()=>location.hash='settings'));
+  bottom.append(issues,sources);target.append(bottom);
+}
+function renderDashboardMetrics(target,result) {
+  clear(target);if(result.error)notice(target,result.error,'warning');
+  if(!result.configured)notice(target,result.note||'Подключите Prometheus / VictoriaMetrics. Значения утилизации пока неизвестны.');
+  const grid=node('div','utilization-grid');
+  for(const [key,title,hint] of [['cpu','CPU','Non-idle CPU узлов'],['ram','RAM','Total − available'],['disk','Диски /','Корневая файловая система узлов; не PVC']]) {
+    const value=result.metrics?.[key],card=node('article','panel utilization-card');card.dataset.testid=`utilization-${key}`;
+    const stale=value?.observed_at && Date.now()/1000-value.observed_at>120;
+    card.append(append(node('div','utilization-head'),append(node('div'),node('h3','',title),node('small','muted',hint)),donut(value?.percent,title,stale?'amber':value?.percent>=90?'danger':value?.percent>=75?'amber':'')));
+    if(!Number.isFinite(value?.percent))card.append(node('p','muted','Нет данных'));
+    if(value?.error)notice(card,value.error,'warning');
+    if(stale)notice(card,'Значение метрики устарело','warning');
+    if(value?.observed_at)card.append(node('small','metadata',`Источник: ${date(value.observed_at*1000)}`));
+    const points=value?.history||[];
+    if(points.length>1){const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 400 110');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${title}: история, шкала 0–100%`);svg.classList.add('history-chart');
+      for(const y of [5,55,105]){const line=document.createElementNS(svg.namespaceURI,'line');for(const [k,v] of Object.entries({x1:0,x2:400,y1:y,y2:y,stroke:'#2b4054'}))line.setAttribute(k,v);svg.append(line);}
+      let segment=[];const flush=()=>{if(segment.length>1){const poly=document.createElementNS(svg.namespaceURI,'polyline');poly.setAttribute('points',segment.join(' '));poly.setAttribute('fill','none');poly.setAttribute('stroke',key==='cpu'?'#27d6b5':key==='ram'?'#71a6ff':'#b69af7');poly.setAttribute('stroke-width','2.5');svg.append(poly);}segment=[];};let prior=null;
+      for(const [ts,v] of points){if(prior!==null && ts-prior>result.step*1.5)flush();segment.push(`${400*(ts-result.start)/(result.end-result.start)},${105-v}`);prior=ts;}flush();card.append(svg,node('small','metadata',`${metricWindow} · шкала 0–100% · пропуски не соединяются`));
+    }else card.append(node('div','history-empty',value?.history_error||'История пока недоступна'));
+    grid.append(card);
+  }
+  target.append(grid);if(result.note)target.append(node('p','inline-help',result.note));
+}
+
 async function loadResources() {
   $('#collect-now').disabled = !state.cluster;
   clear('#resource-notice'); clear('#metric-content');
