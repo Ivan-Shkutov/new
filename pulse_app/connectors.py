@@ -282,14 +282,24 @@ def _redact_log_row(value):
     return value
 
 
-def resource_logs(config, namespace, pod, container=None, previous=False) -> str:
+def resource_logs(config, namespace, pod, container=None, previous=False, *, expected_uid=None) -> str:
     namespace, pod = _name(namespace, "namespace"), _name(pod, "pod")
     params = {"tailLines": 500, "limitBytes": 262144, "timestamps": "true", "previous": "true" if previous else "false"}
     if container:
         params["container"] = _name(container, "container")
     with _client(config) as client:
-        return redact_sensitive_text(_request(client, "GET", _url(config.get("server"), https_only=True)
-                        + f"/api/v1/namespaces/{namespace}/pods/{pod}/log", params=params, as_json=False))
+        pod_url = _url(config.get("server"), https_only=True) + f"/api/v1/namespaces/{namespace}/pods/{pod}"
+        def check_identity():
+            if expected_uid:
+                current = _request(client, "GET", pod_url)
+                if not isinstance(current, dict) or current.get("metadata", {}).get("uid") != expected_uid:
+                    raise ConnectorError("UID Pod изменился; логи другого объекта исключены")
+        # Kubernetes logs are addressed by name, not UID. Check both sides of
+        # the read so replacement during the request cannot contaminate a case.
+        check_identity()
+        text = _request(client, "GET", pod_url + "/log", params=params, as_json=False)
+        check_identity()
+        return redact_sensitive_text(text)
 
 
 METRIC_EXPRESSIONS = {
@@ -297,6 +307,8 @@ METRIC_EXPRESSIONS = {
     "memory": "sum by (namespace,pod) (container_memory_working_set_bytes{scope})",
     "node_cpu": "sum by (instance) (rate(node_cpu_seconds_total{scope}[5m]))",
     "node_memory": "node_memory_MemAvailable_bytes{scope}",
+    "node_memory_total": "node_memory_MemTotal_bytes{scope}",
+    "filesystem_size": "node_filesystem_size_bytes{scope}",
     "filesystem": "node_filesystem_avail_bytes{scope}",
     "pvc_used": "kubelet_volume_stats_used_bytes{scope}",
     "pvc_capacity": "kubelet_volume_stats_capacity_bytes{scope}",
@@ -491,3 +503,34 @@ def dashboard_metrics(settings, window='1h'):
         results = dict(executor.map(read, ('cpu','ram','disk')))
     return {'window':window,'start':start,'end':end,'step':step,'metrics':results,
             'note':'Node exporter: CPU non-idle; RAM = total − available; диски = корневая ФС /, total − available. Покрытие зависит от scrape и меток.'}
+
+
+def holmes_chat(settings, messages):
+    """HolmesGPT 0.45.0 /api/chat contract; no silent fallback to a different engine."""
+    ask = messages[-1]['content']
+    with _client(settings, timeout=httpx.Timeout(180,connect=10)) as client:
+        info=_request(client,'GET',_url(settings.get('url'))+'/api/info',params={'detail':'full'})
+        if not isinstance(info,dict) or not isinstance(info.get('toolsets'),list) or not info.get('auth_enabled'):
+            raise ConnectorError('Holmes не подтвердил защищённый контракт /api/info?detail=full')
+        active={t.get('name') for t in info['toolsets'] if t.get('enabled') and t.get('status')=='enabled'}
+        if 'pulse-readonly' not in active or active-{'pulse-readonly','skills'}:
+            raise ConnectorError('Holmes tools не прошли проверку: разрешены только pulse-readonly и skills')
+        data = _request(client,'POST',_url(settings.get('url'))+'/api/chat',json={
+            'ask':ask,'model':settings.get('model') or None,'stream':False,
+            'additional_system_prompt':messages[0]['content'],
+            'conversation_history':[m for m in messages[1:-1] if m['role'] in ('user','assistant')],
+            'enable_tool_approval':False})
+    if not isinstance(data,dict) or not isinstance(data.get('analysis'),str) or not data['analysis'].strip():
+        raise ConnectorError('HolmesGPT вернул неподдерживаемый ответ /api/chat')
+    if data.get('pending_approvals'):
+        raise ConnectorError('Holmes запросил неподдерживаемое действие. Проверьте разрешённые read-only tools.')
+    calls=data.get('tool_calls') or []
+    # Store names/status only, not raw tool arguments, bodies, headers or credentials.
+    trace=[{'tool':str(c.get('tool_name') or c.get('name') or 'Holmes tool')[:120],
+            'status':str(c.get('status') or 'reported')[:40]} for c in calls[:30] if isinstance(c,dict)]
+    return redact_sensitive_text(data['analysis']),trace
+
+
+def redact_structure(value):
+    """Redact strings and credential fields before JSON encoding, preserving JSON shape."""
+    return _redact_log_row(value)

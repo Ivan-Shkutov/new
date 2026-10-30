@@ -107,6 +107,28 @@ def test_logs_are_bounded_and_not_path_injected(monkeypatch):
         c.resource_logs(config, "../../secrets", "pod-1")
 
 
+@pytest.mark.parametrize('uids,accepted,read_log', [
+    (['replacement'], False, False),
+    (['original', 'replacement'], False, True),
+    (['original', 'original'], True, True),
+])
+def test_investigation_logs_reject_replaced_pod_uid(monkeypatch, uids, accepted, read_log):
+    identities = iter(uids)
+    paths = []
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith('/log'):
+            return httpx.Response(200, text='log body')
+        return httpx.Response(200, json={'metadata': {'uid': next(identities)}})
+    install_transport(monkeypatch, handler)
+    if accepted:
+        assert c.resource_logs({'server': 'https://cluster.test'}, 'default', 'pod-1', expected_uid='original') == 'log body'
+    else:
+        with pytest.raises(c.ConnectorError, match='UID'):
+            c.resource_logs({'server': 'https://cluster.test'}, 'default', 'pod-1', expected_uid='original')
+    assert any(p.endswith('/log') for p in paths) == read_log
+
+
 def test_metrics_require_scope_and_reject_promql(monkeypatch):
     with pytest.raises(c.ConnectorError, match="labels"):
         c.query_metrics({"url": "https://example.test"}, "cpu")

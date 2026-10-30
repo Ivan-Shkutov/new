@@ -17,7 +17,7 @@ def age(value, now):
         return None
 
 
-def assess(snapshot, cid, cname, workloads, interval=30, enabled=True):
+def assess(snapshot, cid, cname, workloads, interval=30, enabled=True, issue_limit=40):
     now = datetime.now(timezone.utc)
     observed = snapshot.get('observed_at')
     elapsed = age(observed,now)
@@ -144,7 +144,7 @@ def assess(snapshot, cid, cname, workloads, interval=30, enabled=True):
             'pods':{'ready':ready_pods if resources.get('pods') and not resources['pods'].get('error') else None,
                     'active':active_pods if resources.get('pods') and not resources['pods'].get('error') else None,
                     'restarts':restarts,'restart_note':'Сумма счётчиков текущих Pod; не частота за интервал'},
-            'node_rows':node_rows,'events':events[:10],'issues':issues[:40],'issues_total':len(issues)}
+            'node_rows':node_rows,'events':events[:10],'issues':issues if issue_limit is None else issues[:issue_limit],'issues_total':len(issues)}
 
 
 def aggregate(rows):

@@ -35,6 +35,9 @@ class Store:
             columns = {r['name'] for r in c.execute('PRAGMA table_info(investigations)')}
             if 'previous_id' not in columns:
                 c.execute("ALTER TABLE investigations ADD COLUMN previous_id TEXT NOT NULL DEFAULT ''")
+            for name in ('context','trace'):
+                if name not in columns:
+                    c.execute(f"ALTER TABLE investigations ADD COLUMN {name} TEXT NOT NULL DEFAULT '{{}}'")
             c.execute("UPDATE investigations SET status='interrupted',error='Процесс перезапущен. Повторите расследование вручную.' WHERE status IN ('queued','running')")
         os.chmod(self.path, 0o600)
 

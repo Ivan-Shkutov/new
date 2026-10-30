@@ -44,7 +44,7 @@ def workload_state(kind, obj):
     return 'ready'
 
 
-def summarize(snapshot, cid, cname, interval=30):
+def summarize(snapshot, cid, cname, interval=30, issue_limit=40):
     from .health import assess, age
     observed = snapshot.get('observed_at')
     elapsed = age(observed,datetime.now(timezone.utc))
@@ -62,7 +62,7 @@ def summarize(snapshot, cid, cname, interval=30):
                            'label':LABELS[kind], 'states':dict(states) if usable else {},
                            'partial':bool(entry and entry.get('truncated')), 'stale':stale,
                            'error':entry.get('error') if entry else 'Ещё нет данных'}
-    health = assess(snapshot,cid,cname,workloads,interval)
+    health = assess(snapshot,cid,cname,workloads,interval,issue_limit=issue_limit)
     return {'workloads':workloads,'issues':health['issues'],'issues_total':health['issues_total'],'stale':stale,'health':health}
 
 

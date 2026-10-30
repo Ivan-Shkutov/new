@@ -1,6 +1,6 @@
 # Подключение кластера и проверка всей цепочки
 
-Инструкция для Pulse 0.6.1 на 10.129.160.10. Рабочая панель сама по себе не подтверждает подключение Kubernetes, метрик, Astra и LLM. Выполняйте этапы по порядку и останавливайтесь при ошибке.
+Инструкция для Pulse 0.9.0 на 10.129.160.10. Рабочая панель сама по себе не подтверждает подключение Kubernetes, метрик, Astra и LLM. Выполняйте этапы по порядку и останавливайтесь при ошибке.
 
 ## 1. Найти административный kubectl
 
@@ -19,14 +19,14 @@ kubectl get nodes -o wide
 Если kubectl настроен на сервере Pulse:
 
 ```bash
-cd /opt/pulse-clusters-0.6.1
+cd /opt/pulse-clusters-0.9.0
 kubectl config current-context
 kubectl apply -f deploy/rbac-readonly.yaml
 ```
 
 Команда создаёт namespace pulse-observer, service account pulse-reader и роль чтения. Никакие workload не изменяются.
 
-**Для ранее скачанного complete-архива 0.6.1 нужна поправка:** исходный RBAC пропускал ReplicationController и PodDisruptionBudget. Текущий файл в main исправлен; для старого архива добавьте эти два разрешения:
+**Только для старого complete-архива 0.6.1; в 0.9.0 уже исправлено:** исходный RBAC пропускал ReplicationController и PodDisruptionBudget. Текущий файл в main исправлен; для старого архива добавьте эти два разрешения:
 
 ```bash
 kubectl patch clusterrole pulse-reader --type=json -p='[{"op":"add","path":"/rules/-","value":{"apiGroups":[""],"resources":["replicationcontrollers"],"verbs":["get","list","watch"]}},{"op":"add","path":"/rules/-","value":{"apiGroups":["policy"],"resources":["poddisruptionbudgets"],"verbs":["get","list","watch"]}}]'

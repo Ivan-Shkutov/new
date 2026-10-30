@@ -1,8 +1,12 @@
-# Pulse Clusters 0.8.0
+# Pulse Clusters 0.9.0
 
 Самостоятельная панель наблюдения за Kubernetes: несколько кластеров, 22 типа ресурсов, метрики Prometheus/VictoriaMetrics, логи Kubernetes и адаптер логов Astra, контекстные вопросы локальной LLM, документы с полнотекстовым поиском, история расследований и подтверждённые решения.
 
 **Начните с [пошаговой инструкции для вашего сервера](START-HERE-RU.md).** [Полная установка и эксплуатация](docs/INSTALL-RU.md). [Подключить кластер и проверить работу](docs/CONNECT-CLUSTER-RU.md) · [Проверки выпуска](docs/QA-RU.md) · [Контракты интеграций](docs/CONNECTORS-RU.md).
+
+## Компактный Обзор 0.9.0
+
+Три верхние карточки, CPU/RAM/диски, семь workloads в ряд; список проблем с поиском и страницами. Круг открывает подробный dashboard, ✧ — контекстный диалог ИИ. [Изменения и обновление с сохранением данных](docs/UPDATE-0.9.0-RU.md). [HolmesGPT и приёмка read-only tools](docs/HOLMES-RU.md).
 
 ## Pulse Dark: оценка состояния с первого взгляда
 
@@ -10,7 +14,7 @@
 
 ## Варианты оформления для выбора
 
-[Четыре визуальных исполнения D+B с круговыми индикаторами: Dark / Light / Control Room / Focus](design/overview-styles/README.md). Картинки и автономный HTML-макет; выбранный стиль будет внедрён после выбора.
+[Четыре визуальных исполнения D+B с круговыми индикаторами: Dark / Light / Control Room / Focus](design/overview-styles/README.md). Картинки и автономный HTML-макет; для рабочего интерфейса выбран вариант 1.
 
 ## Новый обзор D+B
 
@@ -18,7 +22,7 @@
 
 ## Выбор нового обзора
 
-[Четыре макета дашборда: Headlamp / Lens + Grafana / Rancher / Pulse 360](design/overview-variants/README.md). Это варианты для выбора, рабочий интерфейс ими пока не заменён.
+[Четыре макета дашборда: Headlamp / Lens + Grafana / Rancher / Pulse 360](design/overview-variants/README.md). Ранние макеты сохранены для истории решений; рабочий интерфейс описан выше.
 
 [Подключение локальной LLM qwen и проверка расследования](docs/LLM-LOCAL-RU.md).
 
@@ -47,7 +51,7 @@ cat runtime/secrets/portal-password
 - Docker, CLI init/start/stop/check/backup/restore/export-image, RBAC reader и экспорт краткосрочного kubeconfig.
 - Зависимости закреплены с хешами; базовый образ закреплён digest.
 
-Это новая реализация, а не исходники прежнего 0.5.0. Нет многопользовательского RBAC/OIDC, автоматических исправлений, автономного tool-calling агента, Holmes/AURA, PostgreSQL/Qdrant, Astra incidents или автоматического переноса старого runtime. Astra logs требует bearer token; совместимость с реальной версией сервера проверяется отдельно. LLM, модельные веса, Docker Engine и Kubernetes устанавливаются отдельно.
+Это новая реализация, а не исходники прежнего 0.5.0. Нет многопользовательского RBAC/OIDC, автоматических исправлений, AURA, PostgreSQL/Qdrant или Astra incidents. HolmesGPT подключается отдельно по [инструкции](docs/HOLMES-RU.md); реальный контейнер не проверен в текущей среде из-за запрета его registry. Обновление прежних установок Pulse использует backup/restore, не удаление runtime. Astra logs требует bearer token; совместимость с реальной версией сервера проверяется отдельно. LLM, модельные веса, Docker Engine и Kubernetes устанавливаются отдельно.
 
 Документы в `docs/imported` и `docs/review` относятся к прежнему описанию 0.5.0 и не являются инструкцией для этого выпуска. Настоящий путь установки — `docs/INSTALL-RU.md`.
 
