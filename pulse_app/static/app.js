@@ -69,6 +69,7 @@ function setCluster(id) {
 }
 async function loadClusters() {
   const result = await api('/clusters'); state.clusters = result.items || [];
+  try{const v=await api('/version');$('#version').textContent=v.version+' · '+v.build_id.slice(0,8);$('#version').title=v.build_id;}catch(_){}
   const select = clear('#cluster-select'); append(select, new Option('Все кластеры', ''));
   state.clusters.forEach(item => select.append(new Option(`${item.name}${item.enabled ? '' : ' · пауза'}`, item.id)));
   if (state.cluster && !state.clusters.some(item => item.id === state.cluster)) setCluster('');
@@ -169,7 +170,7 @@ async function loadProblemTable(board){const request=++problemRequest;const list
  if(!result.items.length)list.append(append(node('tr'),Object.assign(node('td','muted','Сигналов по выбранному фильтру нет'),{colSpan:6})));
  clear(pager);const prev=button('←',()=>{problemOffset=Math.max(0,problemOffset-25);loadProblemTable(board);});prev.disabled=problemOffset===0;const next=button('→',()=>{problemOffset+=25;loadProblemTable(board);});next.disabled=problemOffset+25>=result.total;pager.append(node('span','muted',`${result.total?problemOffset+1:0}–${Math.min(problemOffset+25,result.total)} из ${result.total}`),prev,next);const coverage=$('.problem-coverage',board);coverage.textContent=result.coverage.some(c=>c.incomplete||c.stale||!c.enabled)?'Есть неполные / устаревшие источники':'По доступным Kubernetes-наблюдениям';
  }catch(e){clear(list).append(append(node('tr'),Object.assign(node('td','critical-text',errorText(e)),{colSpan:6})));}}
-async function loadOverview(){const request=++overviewRequest,selected=state.cluster,target=$('#overview-content');const data=await api('/dashboard'+(selected?`?cluster_id=${encodeURIComponent(selected)}`:''));if(request!==overviewRequest||selected!==state.cluster||state.page!=='overview')return;clear(target);state.overview=data.clusters||[];$('#version').textContent=data.version;
+async function loadOverview(){const request=++overviewRequest,selected=state.cluster,target=$('#overview-content');const data=await api('/dashboard'+(selected?`?cluster_id=${encodeURIComponent(selected)}`:''));if(request!==overviewRequest||selected!==state.cluster||state.page!=='overview')return;clear(target);state.overview=data.clusters||[];$('#version').textContent=data.version+(data.build_id?' · '+data.build_id.slice(0,8):'');$('#version').title=data.build_id||data.version;
  if(!state.overview.length){target.append(empty('Подключите кластер','Добавьте reader kubeconfig.',button('+ Добавить',()=>openCluster())));return;}
  const board=node('div','compact-board');target.append(board);const h=data.health||{},nh=h.nodes||{},clusters=data.clusters;
  const facts=overviewFacts(clusters),bar=node('div','compact-status');bar.append(healthBadge(h.status||'unknown'),node('strong','cluster-caption',clusters.length===1?clusters[0].name:`Кластеров: ${clusters.length}`));const meta=node('div','passport-meta');
@@ -188,7 +189,9 @@ async function loadOverview(){const request=++overviewRequest,selected=state.clu
 
 function renderDashboardMetrics(target,result,interactive=true) {
   clear(target);if(result.error)notice(target,result.error,'warning');
-  if(!result.configured)notice(target,result.note||'Подключите Prometheus / VictoriaMetrics. Значения утилизации пока неизвестны.');
+  const missing=!result.configured||result.error||['cpu','ram','disk'].some(k=>!Number.isFinite(result.metrics?.[k]?.percent));
+  if(missing&&interactive){const bar=node('div','metrics-connect-bar');bar.append(node('span','',result.configured?(result.error||'Не все метрики доступны'):result.note||'Источник метрик не подключён'),button(result.configured?'Диагностика метрик':'Подключить метрики',()=>openMetricSetup()));target.append(bar);}
+  else if(!result.configured)notice(target,result.note||'Источник метрик не подключён');
   const grid=node('div','utilization-grid');
   for(const [key,title,hint] of [['cpu','CPU','Non-idle CPU узлов'],['ram','RAM','Total − available'],['disk','Диски /','Корневая файловая система узлов; не PVC']]) {
     const value=result.metrics?.[key],card=node('article','panel utilization-card');card.dataset.testid=`utilization-${key}`;
@@ -207,7 +210,7 @@ function renderDashboardMetrics(target,result,interactive=true) {
       let segment=[];const flush=()=>{if(segment.length>1){const poly=document.createElementNS(svg.namespaceURI,'polyline');poly.setAttribute('points',segment.join(' '));poly.setAttribute('fill','none');poly.setAttribute('stroke',key==='cpu'?'#27d6b5':key==='ram'?'#71a6ff':'#b69af7');poly.setAttribute('stroke-width','2.5');svg.append(poly);}segment=[];};let prior=null;
       for(const [ts,v] of points){if(prior!==null && ts-prior>result.step*1.5)flush();segment.push(`${400*(ts-result.start)/(result.end-result.start)},${105-v}`);prior=ts;}flush();card.append(svg,node('small','metadata',`${result.window||metricWindow} · шкала 0–100% · пропуски не соединяются`));
     }else card.append(node('div','history-empty',value?.history_error||'История пока недоступна'));
-    card.dataset.metric=key;if(interactive)activateCard(card,()=>openMetricDetail(key),`${title}: подробный dashboard`);grid.append(card);
+    card.dataset.metric=key;if(interactive)activateCard(card,()=>result.configured?openMetricDetail(key):openMetricSetup(),`${title}: подробный dashboard`);grid.append(card);
   }
   target.append(grid);if(result.note)target.append(node('p','inline-help',result.note));
 }
@@ -456,7 +459,7 @@ function safeAnswer(text){
  }
  return root;
 }
-function showAnalysisJobs(jobs){const root=clear('#ai-conversation');for(const job of jobs){const turn=node('article','chat-turn');turn.append(node('div','chat-question',job.question));if(job.answer){if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Ответ поступает; анализ ещё не завершён.':'Незавершённый ответ — анализ не подтверждён.','warning');turn.append(safeAnswer(job.answer));}if(job.error)notice(turn,job.error,'error');if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));const trace=readJson(job.trace,[]);if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}const evidence=readJson(job.evidence,{});if(evidence.records)showEvidence(turn,evidence);else if(!analysisState?.context?.chat) turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));root.append(turn);}root.scrollTop=root.scrollHeight;}
+function showAnalysisJobs(jobs){const root=clear('#ai-conversation');for(const job of jobs){const turn=node('article','chat-turn');turn.append(node('div','chat-question',job.question));if(job.answer){if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Ответ поступает; анализ ещё не завершён.':'Незавершённый ответ — анализ не подтверждён.','warning');turn.append(safeAnswer(job.answer));}if(job.error)notice(turn,job.error,'error');if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));const trace=readJson(job.trace,[]);if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}const evidence=readJson(job.evidence,{});if(evidence.records)showEvidence(turn,evidence);else if(!analysisState?.context?.chat) turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));root.append(turn);}const last=root.lastElementChild;if(last&&jobs.at(-1)?.status==='done')root.scrollTop+=last.getBoundingClientRect().top-root.getBoundingClientRect().top;else root.scrollTop=root.scrollHeight;}
 function forgetAnalysis(){
  clearTimeout(analysisTimer);analysisSequence++;
  const sid=analysisState?.session;analysisState=null;
@@ -575,3 +578,35 @@ async function loadVectorKnowledge(query=''){
 $('#vector-upload-form').addEventListener('submit',event=>{event.preventDefault();const form=event.currentTarget;busy(form.querySelector('[type=submit]'),async()=>{try{const file=form.elements.file.files[0];if(!file||file.size>2_000_000)throw new Error('Выберите текстовый документ до 2 MB');await api('/knowledge/documents',{method:'POST',body:{name:file.name,body:await file.text(),source:form.elements.source.value,product:form.elements.product.value,version:form.elements.version.value,cluster_id:state.cluster,language:'ru'}});message(form,'Документ проиндексирован',true);await loadVectorKnowledge();}catch(e){message(form,errorText(e));}});});
 
 $('#vector-search-form').addEventListener('submit',event=>{event.preventDefault();vectorOffset=0;loadVectorKnowledge(event.currentTarget.elements.q.value.trim());});
+
+function showMetricProbe(target,report){
+ clear(target);notice(target,report.action||report.error||report.status,report.ok?'info':'warning');
+ if(report.source)target.append(node('pre','',JSON.stringify(report.source,null,2)));
+ const table=node('table');table.append(append(node('thead'),append(node('tr'),...['Метрика','Утилизация','Узлы','Ошибка'].map(x=>node('th','',x)))));const body=node('tbody');
+ for(const [key,v] of Object.entries(report.metrics||{}))body.append(append(node('tr'),node('td','',key.toUpperCase()),node('td','',Number.isFinite(v.percent)?`${v.percent}%`:'—'),node('td','',`${v.covered??0}/${v.expected??'—'}`),node('td','',v.error||(v.missing?.length?'Нет узлов: '+v.missing.join(', '):v.foreign?.length?'Неизвестные узлы: '+v.foreign.join(', '):'—'))));
+ table.append(body);target.append(append(node('div','table-wrap'),table));
+}
+async function openMetricSetup(cid=selectedMetricCluster()){
+ if(!cid){toast('Выберите один кластер');return;}
+ const target=detailShell('Метрики · подключение и проверка'),panel=node('section','panel');target.append(panel);
+ panel.append(node('p','muted','Настройки сохраняются после получения свежих CPU/RAM/дисков и проверки соответствия узлам выбранного кластера.'));
+ const current=state.clusters.find(c=>c.id===cid)?.metrics||{};
+ const source=node('select');source.setAttribute('aria-label','Источник метрик в кластере');source.append(new Option('Ищем Prometheus / VictoriaMetrics…',''));
+ const mode=node('select');mode.setAttribute('aria-label','Область источника метрик');mode.append(new Option('Выделенный для этого кластера','dedicated'),new Option('Общий источник — нужны cluster labels','shared'));mode.value=current.mode||'dedicated';
+ const labels=node('input');labels.setAttribute('aria-label','Метки источника JSON');labels.value=JSON.stringify(current.labels||{});labels.placeholder='{"cluster":"peoplehub"}';
+ const report=node('div','metric-probe-report'),controls=node('div','actions');
+ const save=button('Проверить и сохранить',event=>busy(event.currentTarget,async()=>{
+  try{
+   if(source.value==='')throw new Error('Выберите найденный источник');const candidate=found[Number(source.value)];
+   const scope=JSON.parse(labels.value||'{}');if(mode.value==='shared'&&!Object.keys(scope).length)throw new Error('Задайте cluster labels общего источника');
+   const settings={...candidate,url:'',mode:mode.value,labels:scope};clear(report);notice(report,'Проверяем CPU, RAM, диски и соответствие узлам…');
+   const result=await api(`/clusters/${encodeURIComponent(cid)}/metrics-connect`,{method:'POST',body:{source:settings}});
+   if(!panel.isConnected)return;showMetricProbe(report,result);
+   if(result.saved){await loadClusters();const saved=state.clusters.find(c=>c.id===cid);if(!sameMetricsConfig(settings,saved?.metrics))throw new Error('Повторное чтение не подтвердило настройки метрик');toast('CPU, RAM и диски проверены. Настройки сохранены.');$('#dashboard-detail').close();if(state.page==='overview')await loadOverview();}
+  }catch(e){if(panel.isConnected)notice(clear(report),errorText(e),'error');}
+ })),diagnose=button('Проверить сохранённый источник',event=>busy(event.currentTarget,async()=>{try{clear(report);notice(report,'Проверяем сохранённые настройки…');const result=await api(`/clusters/${encodeURIComponent(cid)}/metrics-diagnostics`);if(panel.isConnected)showMetricProbe(report,result);}catch(e){if(panel.isConnected)notice(clear(report),errorText(e),'error');}}));
+ save.disabled=true;controls.append(save,diagnose,button('Полные настройки',()=>{const c=state.clusters.find(c=>c.id===cid);$('#dashboard-detail').close();openCluster(c);}));
+ panel.append(append(node('label'),node('span','','Источник в Kubernetes'),source),append(node('label'),node('span','','Область данных'),mode),append(node('label'),node('span','','Cluster labels (JSON)'),labels),controls,report);
+ let found=[];
+ try{const data=await api(`/clusters/${encodeURIComponent(cid)}/metrics-discovery`);if(!panel.isConnected)return;found=data.items||[];clear(source);source.append(new Option(found.length?'Выберите источник':'Источники не найдены',''));found.forEach((v,i)=>source.append(new Option(`${v.namespace}/${v.service}:${v.port}`,String(i))));if(found.length===1)source.value='0';save.disabled=!found.length;if(data.error)notice(report,'Поиск: '+data.error+(data.cached?' · показан прежний снимок сервисов':''),'warning');if(!found.length)notice(report,'Проверьте право list services и доступ к API. Для прямого URL используйте полные настройки.','warning');}catch(e){if(panel.isConnected)notice(report,errorText(e),'error');}
+}

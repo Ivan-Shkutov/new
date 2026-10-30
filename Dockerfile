@@ -12,6 +12,6 @@ RUN --mount=type=bind,source=.,target=/src,readonly \
     else pip install --no-cache-dir --require-hashes -r requirements.txt; fi
 COPY pulse_app /app/pulse_app
 COPY knowledge /app/knowledge
-RUN chmod -R a+rX /app/pulse_app /app/knowledge
+RUN chmod 644 /app/requirements.txt && chmod -R a+rX /app/pulse_app /app/knowledge
 USER 65532:65532
 CMD ["python", "-m", "uvicorn", "pulse_app.app:app", "--host", "127.0.0.1", "--port", "8090"]

@@ -6,6 +6,8 @@ Prepare wheels first using pip download --require-hashes --only-binary=:all:
 """
 import hashlib
 import io
+import json
+import sys
 from pathlib import Path
 import re
 import subprocess
@@ -32,9 +34,16 @@ def main():
     output = ROOT / 'releases' / f'{prefix}-complete.tar.gz'
     output.parent.mkdir(exist_ok=True)
     manifest = ''.join(f'{digest(p)}  {p.relative_to(ROOT)}\n' for p in files).encode()
+    sys.path.insert(0,str(ROOT))
+    from pulse_app.build import identity
+    release_info={k:v for k,v in identity().items() if k!='python'}
+    release_json=(json.dumps(release_info,indent=2)+'\n').encode()
+    manifest+=(hashlib.sha256(release_json).hexdigest()+'  RELEASE.json\n').encode()
     with tarfile.open(output, 'w:gz') as archive:
         for path in files:
             archive.add(path, arcname=f'{prefix}/{path.relative_to(ROOT)}', recursive=False)
+        release_entry=tarfile.TarInfo(f'{prefix}/RELEASE.json');release_entry.size=len(release_json);release_entry.mode=0o644
+        archive.addfile(release_entry,io.BytesIO(release_json))
         info = tarfile.TarInfo(f'{prefix}/MANIFEST.sha256')
         info.size, info.mode = len(manifest), 0o644
         archive.addfile(info, io.BytesIO(manifest))

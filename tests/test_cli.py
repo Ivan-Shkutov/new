@@ -132,3 +132,12 @@ def test_init_never_replaces_lost_key_for_existing_database(tmp_path):
     with pytest.raises(ValueError, match='original key'):
         cli.initialize(runtime)
     assert not (runtime / 'registry.key').exists()
+
+
+@pytest.mark.parametrize('running_version,running_build',[('0.13.0','old'),('0.14.0','0000000000000000')])
+def test_check_rejects_wrong_running_release_or_code(tmp_path,monkeypatch,running_version,running_build):
+    import json
+    runtime=tmp_path/'runtime';cli.initialize(runtime)
+    def reply(*args,**kwargs):return io.BytesIO(json.dumps({'status':'ok','version':running_version,'build_id':running_build}).encode())
+    monkeypatch.setattr(cli.urllib.request,'urlopen',reply)
+    with pytest.raises(ValueError,match='другая сборка'):cli.health_check(runtime)

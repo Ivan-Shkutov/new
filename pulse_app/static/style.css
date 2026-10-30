@@ -23,3 +23,5 @@
 @media(min-width:1100px) and (max-width:1450px){.compact-status .passport-time{display:block}}
 
 #vector-knowledge{margin-bottom:24px}.document-body{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}#vector-documents{margin-top:16px}
+
+.metrics-connect-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 5px;font-size:10px;color:var(--amber)}.metrics-connect-bar .button{font-size:10px;padding:3px 8px}.metric-probe-report{margin-top:15px}.metric-probe-report pre{white-space:pre-wrap;font-size:11px}

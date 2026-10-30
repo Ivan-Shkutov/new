@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--password-file',type=Path,required=True)
     parser.add_argument('--screenshots',type=Path,default=Path('/tmp/pulse-compact'))
     args=parser.parse_args();args.screenshots.mkdir(parents=True,exist_ok=True)
-    data=fixture.payload('overview');data['version']='0.13.0'
+    data=fixture.payload('overview');data['version']='0.14.0'
     issues=[]
     for i in range(80):
         row=dict(data['issues'][i%len(data['issues'])]);row['name']+=f'-{i:02d}'

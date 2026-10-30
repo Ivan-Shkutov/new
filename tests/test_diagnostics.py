@@ -129,6 +129,7 @@ def test_metrics_discovery_config_and_error_reporting(client,monkeypatch):
     s=snapshot();s['resources']['services']={'items':[{'metadata':{'namespace':'monitoring','name':'kube-prom-kube-prometheus-prometheus'},'spec':{'ports':[{'port':9090}]}},{'metadata':{'name':'kube-prom-kube-prometheus-operator'},'spec':{'ports':[{'port':443}]}}]}
     monkeypatch.setattr(c,'collect_cluster',lambda cfg:s)
     client.post('/api/clusters/one/refresh',headers=MUTATION)
+    install_transport(monkeypatch,lambda request:httpx.Response(200,json=s['resources']['services']))
     selected=client.get('/api/clusters/one/metrics-discovery').json()['items']
     assert len(selected)==1 and selected[0]['service'].endswith('-prometheus')
     response=client.put('/api/clusters/one',json={'metrics':{**selected[0],'mode':'dedicated'}},headers=MUTATION)
