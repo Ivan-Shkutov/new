@@ -4,7 +4,7 @@
 
 **Начните с [пошаговой инструкции для вашего сервера](START-HERE-RU.md).** [Полная установка и эксплуатация](docs/INSTALL-RU.md). [Подключить кластер и проверить работу](docs/CONNECT-CLUSTER-RU.md) · [Проверки выпуска](docs/QA-RU.md) · [Контракты интеграций](docs/CONNECTORS-RU.md).
 
-[Команды для изучения кластера и выбора показателей Pulse](docs/CLUSTER-INVENTORY-RU.md).
+[Команды для изучения кластера и выбора показателей Pulse](docs/CLUSTER-INVENTORY-RU.md). [Разбор снимка PeopleHub 30.10.2026](docs/PEOPLEHUB-REVIEW-2026-10-30-RU.md).
 
 ## Исправление сохранения метрик 0.11.1
 
