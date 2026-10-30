@@ -89,7 +89,7 @@ def test_collection_stops_pagination(monkeypatch):
         return httpx.Response(200, json={"items": [], "metadata": {"continue": "never-ending"}})
     install_transport(monkeypatch, handler)
     result = c.collect_cluster({"server": "https://example.test", "token": "test"})
-    assert len(requests) == c.MAX_PAGES
+    assert len([r for r in requests if r.url.path=="/api/v1/pods"]) == c.MAX_PAGES
     assert result["resources"]["pods"]["truncated"]
     assert not result["complete"]
 

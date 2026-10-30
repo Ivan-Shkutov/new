@@ -20,11 +20,12 @@ def main():
     parser.add_argument('--password-file',type=Path,required=True)
     parser.add_argument('--screenshots',type=Path,default=Path('/tmp/pulse-compact'))
     args=parser.parse_args();args.screenshots.mkdir(parents=True,exist_ok=True)
-    data=fixture.payload('critical');data['version']='0.11.1'
+    data=fixture.payload('overview');data['version']='0.12.0'
     issues=[]
     for i in range(80):
         row=dict(data['issues'][i%len(data['issues'])]);row['name']+=f'-{i:02d}'
         row['id']=hashlib.sha256(str(i).encode()).hexdigest()[:32];issues.append(row)
+    all_issues=issues;issues=all_issues[:1]
     jobs=[];errors=[];last_request=[]
     def problem_route(route):
         q=parse_qs(urlparse(route.request.url).query);rows=issues
@@ -43,7 +44,8 @@ def main():
         else:route.fulfill(json=jobs[-1])
     def metrics(route):
         now=time.time();result={'configured':True,'window':'1h','start':now-3600,'end':now,'step':30,'note':'Тестовые данные, не состояние сервера пользователя','metrics':{}}
-        for k,n in [('cpu',38),('ram',64),('disk',72)]:result['metrics'][k]={'percent':n,'observed_at':now,'history':[[now-3600+i*30,n+(i%7)-3] for i in range(121)]}
+        for k,n in [('cpu',38),('ram',64),('disk',72)]:result['metrics'][k]={'percent':n,'observed_at':now,'history':[[now-3600+i*30,n+(i%7)-3] for i in range(121)],'nodes':[{'instance':f'10.128.73.{i+5}:9100','percent':(94 if k=='disk' and i==2 else n+i),'observed_at':now} for i in range(6)]}
+        result['expected_nodes']=6
         if 'metrics-detail' in route.request.url:route.fulfill(json={'metric':'cpu','summary':result,'series':{'node_cpu':{'data':{'result':[{'metric':{'instance':'node-01'},'value':[now,'2.4']}]}}},'units':{'node_cpu':'cores'}})
         else:route.fulfill(json=result)
     with sync_playwright() as p:
@@ -58,7 +60,11 @@ def main():
         page.route('**/api/clusters/*/dashboard-metrics?*',metrics)
         page.route('**/api/clusters/*/metrics-detail?*',metrics)
         page.goto(args.base_url)
-        page.locator('[data-testid=utilization-cpu]').get_by_text('38%',exact=True).wait_for()
+        try:page.locator('[data-testid=utilization-cpu]').get_by_text('38%',exact=True).wait_for(timeout=5000)
+        except Exception:
+            print('Overview failure:',errors,page.locator('#global-error').inner_text())
+            page.screenshot(path='/tmp/overview-0120-failure.png',full_page=True)
+            raise
         page.locator('.problem-table-body tr').first.wait_for()
         assert page.locator('.compact-top .signal-tile').count()==3
         assert page.locator('.workload-card').count()==7
@@ -72,6 +78,21 @@ def main():
             assert page.locator('.problem-scroll').bounding_box()['height']>=70,(width,height,'no usable problem list')
             assert len({round(b['y']) for b in page.locator('.workload-card').evaluate_all('(es)=>es.map(e=>e.getBoundingClientRect().toJSON())')})==1
             page.screenshot(path=str(args.screenshots/f'overview-{width}.png'),full_page=True)
+        expect(page.locator('.passport-meta')).to_contain_text('API v1.30.8')
+        expect(page.locator('.passport-meta')).to_contain_text('kubelet v1.30.14')
+        expect(page.locator('[data-testid=pods-ready]')).to_contain_text('162/163')
+        expect(page.locator('[data-testid=nodes-ready]')).to_have_class(__import__('re').compile('healthy'))
+        expect(page.locator('[data-testid=utilization-disk]')).to_have_class(__import__('re').compile('metric-critical'))
+        page.locator('[data-testid=nodes-ready]').click()
+        page.locator('#detail-body .node-dashboard tbody tr').first.wait_for()
+        assert page.locator('#detail-body .node-dashboard tbody tr').count()==6
+        page.screenshot(path=str(args.screenshots/'nodes-detail.png'),full_page=True)
+        page.get_by_role('button',name='Закрыть dashboard',exact=True).click()
+        page.get_by_role('button',name='Сведения',exact=True).click()
+        expect(page.locator('#detail-body')).to_contain_text('v1.30.8')
+        page.get_by_role('button',name='Закрыть dashboard',exact=True).click()
+        issues=all_issues
+        page.locator('#refresh-page').click()
         page.locator('[data-testid=utilization-cpu]').click()
         page.locator('#dashboard-detail').wait_for(state='visible')
         page.locator('#detail-body').get_by_text('instance=node-01',exact=True).wait_for()
@@ -102,6 +123,13 @@ def main():
         expect(page.locator('.problem-pager')).to_contain_text('26–50')
         page.set_viewport_size({'width':390,'height':844})
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        data=fixture.payload('critical')
+        page.locator('#refresh-page').click()
+        expect(page.locator('[data-testid=nodes-ready]')).to_contain_text('5/6')
+        expect(page.locator('[data-testid=nodes-ready]')).to_have_class(__import__('re').compile('critical'))
+        data=fixture.payload('stale')
+        page.locator('#refresh-page').click()
+        expect(page.locator('[data-testid=nodes-ready]')).to_have_class(__import__('re').compile('unknown'))
         assert not errors,errors
         browser.close()
     print('PASS: one screen at 1920x1080 and 1366x768; 3/3/7 rows; real-detail contract; 80 paginated problems; context chat/follow-up/presets/evidence; safe rendering; mobile')

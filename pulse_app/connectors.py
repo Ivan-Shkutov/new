@@ -252,6 +252,17 @@ def collect_cluster(config: dict) -> dict:
                 result["errors"].append(f"{kind}: {exc}")
             if record["error"] or record["truncated"]:
                 result["complete"] = False
+        # Optional metadata: an unavailable /version must not erase resource data.
+        result['cluster_info']={'server_version':None,'error':None}
+        try:
+            if time.monotonic()>=deadline:raise ConnectorError('Collection time budget exceeded')
+            version=_request(client,'GET',base+'/version',deadline=deadline)
+            value=version.get('gitVersion') if isinstance(version,dict) else None
+            if not isinstance(value,str) or len(value)>100 or not re.fullmatch(r'v\d+\.\d+(?:\.\d+)?[A-Za-z0-9.+-]*',value):
+                raise ConnectorError('API did not return a valid Kubernetes server version')
+            result['cluster_info']['server_version']=value
+        except ConnectorError as exc:
+            result['cluster_info']['error']=str(exc)
     return result
 
 
@@ -469,7 +480,7 @@ def llm_chat(settings: dict, messages: list) -> str:
 
 # Ratios are computed by the source across series, never by averaging node percentages.
 # max by(instance, ...) removes duplicate scrape jobs while retaining physical identities.
-def utilization_expressions(settings):
+def utilization_expressions(settings, per_node=False):
     labels = settings.get('labels') or {}
     if not isinstance(labels, dict) or len(labels) > 16:
         raise ConnectorError('Invalid metric cluster labels')
@@ -491,6 +502,10 @@ def utilization_expressions(settings):
     fs = scope('mountpoint="/"', 'fstype!~"tmpfs|overlay|squashfs|ramfs"')
     disk_total = 'max by(instance)(node_filesystem_size_bytes' + fs + ')'
     disk_avail = 'max by(instance)(node_filesystem_avail_bytes' + fs + ')'
+    if per_node:
+        return {'cpu':f'100 * (1 - sum by(instance)({idle}) / sum by(instance)({cpu}))',
+                'ram':f'100 * (1 - ({mem_avail} and on(instance) {mem_total}) / ({mem_total} and on(instance) {mem_avail}))',
+                'disk':f'100 * (1 - ({disk_avail} and on(instance) {disk_total}) / ({disk_total} and on(instance) {disk_avail}))'}
     return {
         'cpu': f'100 * (1 - sum({idle}) / sum({cpu}))',
         'ram': f'100 * (1 - sum({mem_avail} and on(instance) {mem_total}) / sum({mem_total} and on(instance) {mem_avail}))',
@@ -506,10 +521,11 @@ def dashboard_metrics(settings, window='1h'):
     if window not in windows:
         raise ConnectorError('Unsupported history window')
     expressions = utilization_expressions(settings)
+    node_expressions=utilization_expressions(settings,per_node=True)
     end = int(time.time())
     start, step = end - windows[window], max(30, windows[window] // 120)
     def read(metric):
-        base_result = {'percent':None,'observed_at':None,'history':[],'error':None,'history_error':None}
+        base_result = {'percent':None,'observed_at':None,'history':[],'error':None,'history_error':None,'nodes':[],'nodes_error':None}
         with metric_client(settings) as (client, base):
             endpoint = base + '/api/v1/'
             for history in (False, True):
@@ -539,6 +555,16 @@ def dashboard_metrics(settings, window='1h'):
                         base_result['history_error' if history else 'error'] = 'Пустая выборка: проверьте node_exporter, scrape и labels'
                 except (ConnectorError, ValueError, TypeError, KeyError) as exc:
                     base_result['history_error' if history else 'error'] = str(exc) if isinstance(exc, ConnectorError) else 'Источник вернул некорректную метрику'
+            try:
+                reply=_request(client,'GET',endpoint+'query',params={'query':node_expressions[metric]})
+                data=reply.get('data',{})
+                if reply.get('status')!='success' or data.get('resultType')!='vector':raise ConnectorError('Invalid node metrics response')
+                for row in data.get('result',[])[:500]:
+                    ts,value=row['value'];n=float(value);timestamp=float(ts);instance=row.get('metric',{}).get('instance')
+                    if isinstance(instance,str) and math.isfinite(n) and 0<=n<=100 and math.isfinite(timestamp) and start-step<=timestamp<=end+step:
+                        base_result['nodes'].append({'instance':instance,'percent':round(n,2),'observed_at':timestamp})
+                if not base_result['nodes']:base_result['nodes_error']='Нет детализации по узлам'
+            except (ConnectorError,ValueError,TypeError,KeyError):base_result['nodes_error']='Не удалось получить детализацию по узлам'
         return metric, base_result
     with ThreadPoolExecutor(max_workers=3) as executor:
         results = dict(executor.map(read, ('cpu','ram','disk')))

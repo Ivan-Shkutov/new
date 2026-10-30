@@ -224,6 +224,8 @@ def create_app(runtime=None, polling=True):
                 return cached[1]
         try:
             result = {'configured':True, **connectors.dashboard_metrics(cfg,window)}
+            entry=snapshot(cid).get('resources',{}).get('nodes',{})
+            result['expected_nodes']=len(entry.get('items',[])) if entry and not entry.get('error') and not entry.get('truncated') else None
         except connectors.ConnectorError as e:
             result = {'configured':True,'metrics':{},'error':str(e)}
         with metric_cache_lock:

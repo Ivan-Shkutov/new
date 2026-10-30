@@ -87,7 +87,8 @@ def summarize(snapshot, cid, cname, interval=30, issue_limit=40):
                            'partial':bool(entry and entry.get('truncated')), 'stale':stale,
                            'error':entry.get('error') if entry else 'Ещё нет данных'}
     health = assess(snapshot,cid,cname,workloads,interval,issue_limit=issue_limit)
-    return {'workloads':workloads,'issues':health['issues'],'issues_total':health['issues_total'],'stale':stale,'health':health}
+    from .inventory import summarize as cluster_profile
+    return {'workloads':workloads,'issues':health['issues'],'issues_total':health['issues_total'],'stale':stale,'health':health,'profile':cluster_profile(snapshot)}
 
 
 def combine(summaries):

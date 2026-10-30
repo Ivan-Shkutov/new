@@ -52,7 +52,7 @@ def test_query_scope_ratios_history_and_nonfinite(monkeypatch):
         return {'status':'success','data':{'resultType':'vector','result':[{'value':[time.time(),'42.25']}]}}
     monkeypatch.setattr(connectors,'_request',request)
     result=connectors.dashboard_metrics({'url':'https://metrics.test','labels':{'cluster':'one'}},'6h')
-    assert len(seen)==6
+    assert len(seen)==9
     assert all('cluster="one"' in params['query'] for url,params in seen)
     assert all(row['percent']==42.25 and len(row['history'])==1 for row in result['metrics'].values())
     assert any('mountpoint="/"' in params['query'] for url,params in seen)

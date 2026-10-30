@@ -30,6 +30,7 @@ def assess(snapshot, cid, cname, workloads, interval=30, enabled=True, issue_lim
         issues.append({'cluster_id':cid,'cluster_name':cname,'kind':kind,
                        'name':m.get('name','Без имени'),'namespace':m.get('namespace',''),
                        'uid':m.get('uid',''),'severity':severity,'title':title,'detail':detail,
+                       'reason':obj.get('status',{}).get('reason'),'phase':obj.get('status',{}).get('phase'),
                        'state':title,'stale':stale or not enabled,'observed_at':observed})
 
     def entry_items(kind):
