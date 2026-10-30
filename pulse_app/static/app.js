@@ -459,16 +459,45 @@ function safeAnswer(text){
  }
  return root;
 }
-function showAnalysisJobs(jobs){const root=clear('#ai-conversation');for(const job of jobs){const turn=node('article','chat-turn');turn.append(node('div','chat-question',job.question));if(job.answer){if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Ответ поступает; анализ ещё не завершён.':'Незавершённый ответ — анализ не подтверждён.','warning');turn.append(safeAnswer(job.answer));}if(job.error)notice(turn,job.error,'error');if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));const trace=readJson(job.trace,[]);if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}const evidence=readJson(job.evidence,{});if(evidence.records)showEvidence(turn,evidence);else if(!analysisState?.context?.chat) turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));root.append(turn);}const last=root.lastElementChild;if(last&&jobs.at(-1)?.status==='done')root.scrollTop+=last.getBoundingClientRect().top-root.getBoundingClientRect().top;else root.scrollTop=root.scrollHeight;}
+function showAnalysisJobs(jobs){
+ const root=clear('#ai-conversation');
+ for(const job of jobs){
+  const turn=node('article','chat-turn'),evidence=readJson(job.evidence,{}),trace=readJson(job.trace,[]);
+  turn.append(node('div','chat-question',job.question));
+  if(job.answer){
+   if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Сбор и анализ продолжаются; ниже уже проверенные факты.':'ИИ не завершил ответ. Собранные факты Pulse сохранены ниже.','warning');
+   turn.append(safeAnswer(job.answer));
+  }
+  if(job.error)notice(turn,job.error,'error');
+  if(/Astra AI HTTP (401|403)/.test(job.error||'')){
+   const context={...analysisState.context};
+   turn.append(append(node('div','actions'),
+    button('Повторить через локальную LLM',async()=>{const mode=$('#ai-form').elements.analysis_mode.value;await openAnalysis({...context,engine:'local'});if(analysisState?.session){const form=$('#ai-form');form.elements.question.value=job.question;form.elements.analysis_mode.value=mode;form.requestSubmit();}}),
+    button('Настроить Astra AI',()=>{const cluster=state.clusters.find(c=>c.id===context.cluster_id);$('#ai-dialog').close();if(cluster){openCluster(cluster);$('#cluster-form').elements.astra_ai_url.closest('details').open=true;}})));
+  }
+  if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));
+  const review=Array.isArray(trace)?trace.find(t=>t.tool==='answer-review'):null;
+  if(review?.warnings?.length)notice(turn,'Проверка ответа: '+review.warnings.join(' '),'warning');
+  if(evidence.records?.length){const missing=evidence.records.filter(r=>r.status!=='ok');if(missing.length)notice(turn,`Полнота данных: ${evidence.records.length-missing.length}/${evidence.records.length}. Недоступны: ${missing.map(r=>r.check).join('; ')}. Эти источники не подтверждают вывод.`,'warning');}
+  if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}
+  if(evidence.records)showEvidence(turn,evidence);
+  else if(!analysisState?.context?.chat)turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));
+  root.append(turn);
+ }
+ const last=root.lastElementChild;if(last&&!['queued','running'].includes(jobs.at(-1)?.status))root.scrollTop+=last.getBoundingClientRect().top-root.getBoundingClientRect().top;else root.scrollTop=root.scrollHeight;
+}
 function forgetAnalysis(){
  clearTimeout(analysisTimer);analysisSequence++;
  const sid=analysisState?.session;analysisState=null;
- clear('#ai-conversation');$('#ai-form').reset();$('#ai-status').textContent='';$('#ai-context').textContent='';
+ clear('#ai-conversation');$('#ai-form').reset();$('#analysis-engine-result').textContent='';$('#ai-status').textContent='';$('#ai-context').textContent='';
  if(sid)fetch(`/api/sessions/${encodeURIComponent(sid)}`,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});
 }
 async function openAnalysis(context){
  forgetAnalysis();const sequence=++analysisSequence;
  analysisState={context,session:null,previous:null,jobs:[]};
+ const engine=context.engine||(context.chat?$('#chat-engine').value:'cluster');$('#analysis-engine').value=engine;
+ const selected=state.clusters.find(c=>c.id===context.cluster_id);$('#analysis-engine option[value=cluster]').textContent=selected?.astra_ai?.enabled?'Astra AI · '+selected.astra_ai.model:selected?.holmes?.enabled?'HolmesGPT':'Настройки кластера · локальная LLM';
+ $('#analysis-engine-tools').classList.toggle('hidden',!!context.chat);
  $('#ai-title').textContent=context.chat?'✧ Чат с ИИ':'✧ Анализ проблемы';
  $('#ai-context').textContent=context.chat?`${context.cluster_id&&$('#chat-engine').value==='cluster'?'Движок выбранного кластера: '+context.cluster_id:'Локальная модель напрямую'} · временный диалог. Закрытие удалит переписку из Pulse.`:`${context.cluster_name||context.cluster_id} · ${context.namespace||context.kind||context.metric||'кластер'} · ${context.name||context.title||''}\n${context.title||''} · без сохранения истории`;
  $('#ai-form .ai-presets').classList.toggle('hidden',!!context.chat);
@@ -477,7 +506,7 @@ async function openAnalysis(context){
  $('#ai-form button[type=submit]').disabled=true;
  clear('#ai-conversation').append(node('p','muted',context.chat?'Новый диалог. Можно задать любой вопрос.':'Новый анализ. ИИ получит контекст выбранной проблемы и доступные доказательства.'));
  if(!$('#ai-dialog').open)$('#ai-dialog').showModal();
- try{const result=await api('/sessions',{method:'POST',body:{cluster_id:context.cluster_id||'',mode:context.chat?'chat':'problem',engine:context.chat?$('#chat-engine').value:'cluster'}});
+ try{const result=await api('/sessions',{method:'POST',body:{cluster_id:context.cluster_id||'',mode:context.chat?'chat':'problem',engine}});
   if(sequence!==analysisSequence){fetch('/api/sessions/'+result.id,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});return;}
   analysisState.session=result.id;$('#ai-form button[type=submit]').disabled=false;
  }catch(e){if(sequence===analysisSequence)$('#ai-status').textContent=errorText(e);}
@@ -488,11 +517,20 @@ async function pollAnalysis(id,sequence){
  try{const job=await api(`/sessions/${analysisState.session}/jobs/${encodeURIComponent(id)}`);if(sequence!==analysisSequence)return;
  const index=analysisState.jobs.findIndex(j=>j.id===id);if(index<0)analysisState.jobs.push(job);else analysisState.jobs[index]=job;
  showAnalysisJobs(analysisState.jobs);
- $('#ai-status').textContent={done:'Ответ готов',failed:'Анализ не завершён',queued:'В очереди',running:'Анализ…'}[job.status]||job.status;
+ $('#ai-status').textContent={done:'Ответ получен · сверяйте вывод с доказательствами',failed:'Анализ не завершён',queued:'В очереди',running:'Анализ…'}[job.status]||job.status;
  if(['queued','running'].includes(job.status))analysisTimer=setTimeout(()=>pollAnalysis(id,sequence),1000);
  else{$('#ai-form button[type=submit]').disabled=false;if(job.status==='done')analysisState.previous=id;}
  }catch(e){if(sequence===analysisSequence){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}}
 }
+$('#analysis-engine').addEventListener('change',event=>{if(analysisState)openAnalysis({...analysisState.context,engine:event.target.value});});
+$('#analysis-engine-test').addEventListener('click',event=>busy(event.currentTarget,async()=>{
+ const sequence=analysisSequence,out=$('#analysis-engine-result'),context=analysisState?.context;if(!context)return;
+ const cluster=state.clusters.find(c=>c.id===context.cluster_id),local=$('#analysis-engine').value==='local';
+ const path=!local&&cluster?.astra_ai?.enabled?`/clusters/${encodeURIComponent(context.cluster_id)}/astra-ai-test`:!local&&cluster?.holmes?.enabled?`/clusters/${encodeURIComponent(context.cluster_id)}/holmes-test`:'/settings/test';
+ out.textContent='Проверяем авторизацию и завершение ответа…';
+ try{await api(path,{method:'POST'});if(sequence===analysisSequence)out.textContent='Авторизация и завершение ответа: OK. Верность диагноза проверяйте по доказательствам конкретной ошибки.';}
+ catch(e){if(sequence===analysisSequence)out.textContent=errorText(e);}
+}));
 $('#ai-dialog').addEventListener('close',forgetAnalysis);
 window.addEventListener('pagehide',forgetAnalysis);
 $('#new-chat').addEventListener('click',()=>openAnalysis({cluster_id:state.cluster,chat:true}));

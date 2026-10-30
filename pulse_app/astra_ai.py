@@ -14,6 +14,15 @@ class IncompleteAnswer(c.ConnectorError):
 
 
 def chat(settings, messages, progress=None):
+    # A value copied from DevTools often includes the header scheme. Normalize
+    # only this adapter, including already saved values, without logging it.
+    settings=dict(settings)
+    settings.pop('token',None)  # Logs credentials never replace the AI key.
+    key=settings.get('api_key','')
+    if not isinstance(key,str):raise c.ConnectorError('Неверный формат токена Astra AI')
+    key=re.sub(r'^Bearer\s+','',key.strip(),flags=re.I)
+    if any(ch.isspace() for ch in key):raise c.ConnectorError('В поле Astra AI нужен один Bearer token без заголовков и переносов строк')
+    settings['api_key']=key
     url=c._url(settings.get('url'))
     model=c._text(settings.get('model'),'model',200)
     if not model:raise c.ConnectorError('Нужен model ID Astra AI')
@@ -71,7 +80,10 @@ def chat(settings, messages, progress=None):
     try:
         with c._client(settings,timeout=httpx.Timeout(45,connect=10)) as client:
             with client.stream('POST',url,json={'model':model,'stream':True,'messages':clean},headers={'Accept':'text/event-stream'}) as response:
-                if response.status_code!=200:raise c.ConnectorError(f'Astra AI HTTP {response.status_code}')
+                if response.status_code!=200:
+                    hint={401:'Astra отклонила авторизацию. Обновите Bearer token именно Astra AI в настройках кластера и проверьте поток. Токен логов Astra и токен Kubernetes — отдельные подключения; причина 401 может быть в истёкшем или неподходящем токене.',
+                          403:'Astra запретила доступ к AI endpoint. Проверьте права учётной записи в Astra.'}.get(response.status_code,'Проверьте выбранный AI endpoint.')
+                    raise c.ConnectorError(f'Astra AI HTTP {response.status_code}. '+hint)
                 if response.headers.get('content-type','').split(';',1)[0].strip().lower()!='text/event-stream':
                     raise c.ConnectorError('Astra AI не вернула text/event-stream; проверьте URL и авторизацию')
                 for chunk in response.iter_bytes():

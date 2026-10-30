@@ -223,7 +223,7 @@ def health_check(runtime: Path):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Pulse Clusters 0.14.0 lifecycle')
+    parser = argparse.ArgumentParser(description='Pulse Clusters 0.14.1 lifecycle')
     parser.add_argument('--runtime', type=Path, default=Path(os.environ.get('PULSE_RUNTIME', ROOT / 'runtime')))
     sub = parser.add_subparsers(dest='command', required=True)
     init = sub.add_parser('init'); init.add_argument('--port', type=int, default=8090)
@@ -259,7 +259,7 @@ def main(argv=None):
             output.parent.mkdir(parents=True, exist_ok=True)
             if output.exists():
                 raise ValueError('Output file exists')
-            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.14.0'], check=True)
+            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.14.1'], check=True)
             Path(str(output) + '.sha256').write_text(f'{file_hash(output)}  {output.name}\n')
         elif args.command in ('backup', 'restore'):
             if args.command == 'restore' and not args.confirm_restore:

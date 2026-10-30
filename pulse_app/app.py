@@ -698,6 +698,7 @@ def create_app(runtime=None, polling=True):
         pod: Optional[str] = Field(default=None,max_length=253)
 
     def investigate(jid, body, cfg, llm, resolved_context):
+        live_report={}
         def update(**fields):
             if body.session_id:
                 sessions.update(body.session_id, jid, fields)
@@ -741,6 +742,8 @@ def create_app(runtime=None, polling=True):
                 def progress(report):
                     update(evidence=json.dumps(connectors.redact_structure(report),ensure_ascii=False))
                 live_report=collect_pod(cfg,body.namespace,body.pod,resolved_context.get('uid',''),cached,progress)
+                from .diagnostics import verified_summary
+                update(answer=verified_summary(live_report),evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False))
                 if not resolved_context.get('uid') and live_report.get('pod',{}).get('uid'):
                     resolved_context['uid']=live_report['pod']['uid']
                     update(context=json.dumps(connectors.redact_structure(resolved_context),ensure_ascii=False))
@@ -784,7 +787,8 @@ def create_app(runtime=None, polling=True):
                 trace.append({'tool':'engine','status':'Astra AI / SSE'})
                 update(trace=json.dumps(trace,ensure_ascii=False))
                 def partial(text):
-                    update(answer=text)
+                    prefix=(verified_summary(live_report)+'\n\n## Анализ модели по доказательствам\n') if live_report else ''
+                    update(answer=prefix+text)
                 answer=astra_chat(cfg['astra_ai'],messages,partial)
             elif cfg.get('holmes',{}).get('enabled'):
                 answer,tool_trace=connectors.holmes_chat(cfg['holmes'],messages)
@@ -793,7 +797,9 @@ def create_app(runtime=None, polling=True):
                 answer=connectors.llm_chat(llm,messages)
                 trace.append({'tool':'engine','status':'local LLM'})
             if live_report:
-                from .diagnostics import verified_summary
+                from .diagnostics import verified_summary,review_answer
+                warnings=review_answer(live_report,answer)
+                trace.append({'tool':'answer-review','status':'needs_review' if warnings else 'checked','warnings':warnings,'note':'Проверены ссылки и явная причина; семантическая точность не гарантируется.'})
                 answer=verified_summary(live_report)+'\n\n## Анализ модели по доказательствам\n'+answer
             answer=connectors.redact_sensitive_text(answer)
             update(trace=json.dumps(connectors.redact_structure(trace),ensure_ascii=False))
@@ -806,8 +812,11 @@ def create_app(runtime=None, polling=True):
                 except SessionGone:return
             error=str(exc) if isinstance(exc,connectors.ConnectorError) else 'Не удалось завершить анализ. Проверьте модель, лимиты и источники.'
             from .astra_ai import IncompleteAnswer
-            if isinstance(exc,IncompleteAnswer):
-                update(answer=exc.partial)
+            if live_report:
+                from .diagnostics import verified_summary
+                partial=exc.partial if isinstance(exc,IncompleteAnswer) else ''
+                update(answer=verified_summary(live_report)+('\n\n## Незавершённый ответ модели\n'+partial if partial else ''))
+            elif isinstance(exc,IncompleteAnswer):update(answer=exc.partial)
             partial_trace=locals().get('trace',[])+[{'tool':'analysis','status':'failed'}]
             update(status='failed',error=error,trace=json.dumps(connectors.redact_structure(partial_trace),ensure_ascii=False))
         finally:

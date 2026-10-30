@@ -206,9 +206,32 @@ def collect_pod(config, namespace, name, uid='', cached=None, progress=None):
 
 def verified_summary(report):
     lines=['## Проверенные данные Pulse']
+    cause=emptydir_cause(report)
+    if cause:
+        lines.append('Причина завершения по status.message: превышен лимит EmptyDir `'+cause['volume']+'` — `'+cause['limit']+'`. Это ограничение временного тома Pod; заполнение корневого диска узла этим не доказано.')
     for finding in report.get('findings',[]):lines.append('- ['+finding['source']+'] '+finding['fact'])
     lines.append(f"Проверок: {len(report.get('records',[]))}; недоступны: {report.get('unavailable',0)}. Полный журнал — в доказательствах расследования.")
-    return '\n'.join(lines)
+    return c.redact_sensitive_text('\n'.join(lines))
+
+
+def emptydir_cause(report):
+    pod=report.get('pod',{})
+    if pod.get('reason')!='Evicted':return None
+    match=re.search(r'Usage of EmptyDir volume ["\']([^"\']+)["\'] exceeds the limit ["\']([^"\']+)["\']',pod.get('message') or '',re.I)
+    return {'volume':match[1],'limit':match[2]} if match else None
+
+
+def review_answer(report,answer):
+    """Flag observable omissions; this is not a semantic correctness guarantee."""
+    warnings=[]
+    refs=set(re.findall(r'\bE\d{2}\b',answer))
+    known={r['id'] for r in report.get('records',[])}
+    if known and not refs:warnings.append('Модель не сослалась на журнал E##; сверьте её утверждения с проверенными данными.')
+    if refs-known:warnings.append('В ответе есть ссылки на отсутствующие проверки: '+', '.join(sorted(refs-known)))
+    cause=emptydir_cause(report)
+    if cause and not all(x.casefold() in answer.casefold() for x in ('emptydir',cause['volume'],cause['limit'])):
+        warnings.append('Модель не раскрыла подтверждённое превышение лимита EmptyDir '+cause['volume']+' '+cause['limit']+'. Смотрите проверенные данные Pulse.')
+    return warnings
 
 
 def model_evidence(report):
