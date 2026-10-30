@@ -6,14 +6,37 @@ WORKLOADS = ('daemonsets', 'deployments', 'jobs', 'cronjobs', 'replicasets', 'st
 LABELS = {'daemonsets':'Готовы', 'deployments':'Готовы', 'jobs':'Завершены', 'cronjobs':'Включены', 'replicasets':'Готовы', 'statefulsets':'Готовы', 'pods':'Ready'}
 
 
+def completed_pod_ok(obj):
+    """Succeeded is accepted only with complete, successful container evidence."""
+    spec, status = obj.get('spec', {}), obj.get('status', {})
+    if status.get('phase') != 'Succeeded':
+        return False
+    main = status.get('containerStatuses', [])
+    if not main or len(main) < len(spec.get('containers', [])):
+        return False
+    init = status.get('initContainerStatuses', [])
+    if len(init) < len(spec.get('initContainers', [])):
+        return False
+    if not {c.get('name') for c in spec.get('containers',[])} <= {c.get('name') for c in main}:
+        return False
+    if not {c.get('name') for c in spec.get('initContainers',[])} <= {c.get('name') for c in init}:
+        return False
+    sidecars = {c.get('name') for c in spec.get('initContainers', []) if c.get('restartPolicy') == 'Always'}
+    for container in main + init:
+        terminated = container.get('state', {}).get('terminated')
+        if not terminated or (terminated.get('exitCode') != 0 and container.get('name') not in sidecars):
+            return False
+    return True
+
+
 def workload_state(kind, obj):
     spec, status, meta = obj.get('spec', {}), obj.get('status', {}), obj.get('metadata', {})
-    if meta.get('deletionTimestamp'):
+    if meta.get('deletionTimestamp') and not (kind=='pods' and status.get('phase') in ('Succeeded','Failed')):
         return 'terminating'
     if kind == 'pods':
         phase = status.get('phase', 'Unknown')
         if phase == 'Succeeded':
-            return 'completed'
+            return 'completed' if completed_pod_ok(obj) else 'completion_unverified'
         if phase == 'Failed':
             return 'failed'
         if phase == 'Running' and any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', [])):
@@ -55,11 +78,12 @@ def summarize(snapshot, cid, cname, interval=30, issue_limit=40):
         items = entry.get('items',[]) if entry else []
         states = Counter(workload_state(kind,obj) for obj in items)
         positive = 'completed' if kind=='jobs' else 'enabled' if kind=='cronjobs' else 'ready'
+        positives = states[positive] + (states['completed'] if kind == 'pods' else 0)
         usable = bool(observed and entry is not None and not entry.get('error'))
         workloads[kind] = {'total':len(items) if usable else None,
-                           'positive':states[positive] if usable else None,
-                           'percent':round(100*states[positive]/len(items),1) if usable and items else None,
-                           'label':LABELS[kind], 'states':dict(states) if usable else {},
+                           'positive':positives if usable else None,
+                           'percent':round(100*positives/len(items),1) if usable and items else None,
+                           'label':'Здоровы' if kind=='pods' else LABELS[kind], 'states':dict(states) if usable else {},
                            'partial':bool(entry and entry.get('truncated')), 'stale':stale,
                            'error':entry.get('error') if entry else 'Ещё нет данных'}
     health = assess(snapshot,cid,cname,workloads,interval,issue_limit=issue_limit)
@@ -77,7 +101,7 @@ def combine(summaries):
         for row in valid:
             states.update(row['states'])
         output[kind] = {'total':total,'positive':positive,'percent':round(100*positive/total,1) if total else None,
-                        'label':LABELS[kind],'states':dict(states), 'partial':len(valid)!=len(rows) or any(r['partial'] for r in rows),
+                        'label':'Здоровы' if kind=='pods' else LABELS[kind],'states':dict(states), 'partial':len(valid)!=len(rows) or any(r['partial'] for r in rows),
                         'stale':any(r['stale'] for r in rows), 'error':None if valid else 'Нет доступных снимков',
                         'health':'critical' if any(r.get('health')=='critical' for r in rows) else 'unknown' if any(r.get('health')=='unknown' for r in rows) else 'warning' if any(r.get('health')=='warning' for r in rows) else 'healthy' if total else 'neutral',
                         'problems':sum(r.get('problems',0) for r in rows)}

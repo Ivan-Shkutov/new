@@ -180,7 +180,7 @@ def create_app(runtime=None, polling=True):
 
     def public_cluster(row):
         cfg = row['config']
-        return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': bool(cfg.get('metrics', {}).get('url')), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}}
+        return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}}
 
     from . import dashboard, health
     metric_cache = {}
@@ -201,7 +201,7 @@ def create_app(runtime=None, polling=True):
             summaries.append(summary)
             row.update(summary)
             cfg = cluster(row['id'])['config']
-            row['sources'] = {'metrics':bool(cfg.get('metrics',{}).get('url')), 'astra':bool(cfg.get('astra',{}).get('url'))}
+            row['sources'] = {'metrics':connectors.metrics_configured(cfg.get('metrics',{})), 'astra':bool(cfg.get('astra',{}).get('url'))}
         return {'version':__version__, 'clusters':selected, 'workloads':dashboard.combine(summaries),
                 'health':health.aggregate([s['health'] for s in summaries]),
                 'issues':sorted([issue for summary in summaries for issue in summary['issues']],key=lambda i:health.SEVERITY_ORDER[i['severity']])[:40],
@@ -214,8 +214,8 @@ def create_app(runtime=None, polling=True):
         if window not in ('1h','6h','24h'):
             raise HTTPException(422, 'Допустимые интервалы: 1h, 6h, 24h')
         item = cluster(cid)
-        cfg = item['config'].get('metrics', {})
-        if not cfg.get('url'):
+        cfg = connectors.metrics_config(item['config'])
+        if not connectors.metrics_configured(cfg):
             return {'configured':False, 'metrics':{}, 'note':'Подключите Prometheus / VictoriaMetrics в настройках кластера'}
         key = (cid, hashlib.sha256(json.dumps(cfg,sort_keys=True).encode()).hexdigest(), window)
         with metric_cache_lock:
@@ -264,7 +264,7 @@ def create_app(runtime=None, polling=True):
     @api.get('/clusters/{cid}/metrics-detail')
     def metric_detail(cid: str, metric: str='cpu', window: str='1h'):
         from concurrent.futures import ThreadPoolExecutor
-        cfg=cluster(cid)['config'].get('metrics',{})
+        cfg=connectors.metrics_config(cluster(cid)['config'])
         mapping={'cpu':('node_cpu','cpu'),'ram':('node_memory','node_memory_total','memory'),'disk':('filesystem','filesystem_size','pvc_used','pvc_capacity')}
         if metric not in mapping:
             raise HTTPException(422,'Метрика должна быть cpu, ram или disk')
@@ -273,7 +273,7 @@ def create_app(runtime=None, polling=True):
             try:return key,connectors.query_metrics(cfg,key)
             except connectors.ConnectorError as e:return key,{'error':str(e)}
         series={}
-        if cfg.get('url'):
+        if connectors.metrics_configured(cfg):
             with ThreadPoolExecutor(max_workers=3) as workers:
                 series=dict(workers.map(read,mapping[metric]))
         return {'metric':metric,'summary':summary,'series':series,'nodes':snapshot(cid).get('resources',{}).get('nodes',{}),'units':{'node_cpu':'cores (non-idle)','cpu':'cores','node_memory':'bytes available','node_memory_total':'bytes total','memory':'bytes working set','filesystem':'bytes available','filesystem_size':'bytes total','pvc_used':'bytes used','pvc_capacity':'bytes capacity'}}
@@ -325,6 +325,14 @@ def create_app(runtime=None, polling=True):
                 raise HTTPException(422, f'Недопустимый символ в поле {field}')
         if 'enabled' in source and not isinstance(source['enabled'],bool):
             raise HTTPException(422,'enabled должен быть boolean')
+        if source.get('transport','direct') not in ('direct','kubernetes'):
+            raise HTTPException(422,'Транспорт метрик должен быть direct или kubernetes')
+        if source.get('transport') == 'kubernetes':
+            for field in ('namespace','service'):
+                if not isinstance(source.get(field),str) or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?',source[field]):
+                    raise HTTPException(422,'Нужны корректные namespace и service метрик')
+            if type(source.get('port')) is not int or not 1 <= source['port'] <= 65535:
+                raise HTTPException(422,'Нужен порт сервиса метрик')
         url = source.get('url', '')
         if url:
             try:
@@ -369,6 +377,30 @@ def create_app(runtime=None, polling=True):
                 if patch.get(key) == '' and previous.get(key):
                     patch.pop(key)
         return validate_source({**previous, **patch})
+
+    @api.post('/clusters/{cid}/metrics-test')
+    def test_metrics_source(cid: str):
+        cfg=connectors.metrics_config(cluster(cid)['config'])
+        try:
+            data=connectors.query_metrics(cfg,'node_memory_total')
+            return {'ok':not data['empty'],'series':len(data['data'].get('result',[])),
+                    'note':'node_exporter доступен' if not data['empty'] else 'Нет node_memory_MemTotal_bytes: проверьте node_exporter и labels'}
+        except connectors.ConnectorError as e:
+            raise HTTPException(502,str(e)+'; для Kubernetes proxy проверьте GET services/proxy в namespace monitoring')
+
+    @api.get('/clusters/{cid}/metrics-discovery')
+    def discover_metrics(cid: str):
+        cluster(cid)
+        entry=snapshot(cid).get('resources',{}).get('services',{})
+        items=[]
+        for service in entry.get('items',[]):
+            m=service.get('metadata',{});name=m.get('name','')
+            if not any(t in name for t in ('prometheus','victoria','vmauth','vmselect')) or any(t in name for t in ('operator','alertmanager','exporter','operated','coredns','kubelet','controller','scheduler','etcd','proxy')):
+                continue
+            for port in service.get('spec',{}).get('ports',[]):
+                if port.get('port') in (9090,8428):
+                    items.append({'transport':'kubernetes','namespace':m.get('namespace'),'service':name,'port':port['port']})
+        return {'items':items,'note':'Выберите источник именно этого кластера. Kubernetes service proxy требует отдельного разрешения GET services/proxy.', 'observed_at':snapshot(cid).get('observed_at'),'error':entry.get('error')}
 
     @api.post('/clusters', status_code=201)
     def add_cluster(body: ClusterInput):
@@ -448,7 +480,7 @@ def create_app(runtime=None, polling=True):
 
     @api.get('/clusters/{cid}/metrics')
     def metrics(cid: str):
-        cfg = cluster(cid)['config'].get('metrics', {})
+        cfg = connectors.metrics_config(cluster(cid)['config'])
         result = {}
         for metric in ('cpu','memory','node_cpu','node_memory','filesystem','pvc_used','pvc_capacity'):
             try:
@@ -531,13 +563,14 @@ def create_app(runtime=None, polling=True):
         previous_id: Optional[str] = Field(default=None,max_length=64)
         problem_id: Optional[str] = Field(default=None,max_length=64)
         metric: Optional[str] = Field(default=None,pattern='^(cpu|ram|disk)$')
+        mode: str = Field(default='extended',pattern='^(brief|extended|causes|impact|commands)$')
         namespace: Optional[str] = Field(default=None,max_length=253)
         pod: Optional[str] = Field(default=None,max_length=253)
 
     def investigate(jid, body, cfg, llm, resolved_context):
         try:
             db().execute("UPDATE investigations SET status='running' WHERE id=?", (jid,))
-            from .runbooks import SYSTEM_PROMPT,select_runbooks
+            from .runbooks import SYSTEM_PROMPT,select_runbooks,MODE_PROMPTS
             selected_skills=select_runbooks(resolved_context,body.question)
             trace=[{'tool':'skill:'+r['id'],'status':'selected','version':r['version']} for r in selected_skills]
             if cluster(body.cluster_id)['config'].get('generation')!=cfg.get('generation'):
@@ -559,45 +592,51 @@ def create_app(runtime=None, polling=True):
                 metric_data=dashboard_metric_route(body.cluster_id,'1h')
                 facts={'metric_context':metric_data,**facts}
                 trace.append({'tool':'Prometheus cluster metrics','status':'available' if metric_data.get('configured') else 'unconfigured'})
-            evidence = json.dumps(facts, ensure_ascii=False)
+            evidence = json.dumps(connectors.redact_structure(facts), ensure_ascii=False)
             context = evidence[:24000]
             if len(evidence)>24000:
                 context += '\n[Контекст обрезан; данные неполные]'
             trace.append({'tool':'context scope','status':'cluster '+body.cluster_id})
-            logs_text = ''
+            live_report={}
             if body.pod and body.namespace:
-                try:
-                    current_pod=next((p for p in snap.get('resources',{}).get('pods',{}).get('items',[]) if p.get('metadata',{}).get('namespace')==body.namespace and p.get('metadata',{}).get('name')==body.pod),None)
-                    if resolved_context.get('uid') and (not current_pod or current_pod.get('metadata',{}).get('uid')!=resolved_context['uid']):
-                        raise connectors.ConnectorError('UID Pod изменился. Контекст относится к прежнему объекту.')
-                    logs_text = connectors.resource_logs(cfg['kube'],body.namespace,body.pod,expected_uid=resolved_context.get('uid'))[:8000]
-                    trace.append({'tool':'Pod logs','status':'ok'})
-                except connectors.ConnectorError:
-                    logs_text = '[Логи недоступны или UID изменился]'
-                    trace.append({'tool':'Pod logs','status':'unavailable'})
-            docs = search_docs(body.question, body.cluster_id)
+                from .diagnostics import collect_pod,model_evidence
+                cached=next((p for p in snap.get('resources',{}).get('pods',{}).get('items',[]) if p.get('metadata',{}).get('namespace')==body.namespace and p.get('metadata',{}).get('name')==body.pod),None)
+                def progress(report):
+                    db().execute('UPDATE investigations SET evidence=? WHERE id=?',(json.dumps(connectors.redact_structure(report),ensure_ascii=False),jid))
+                live_report=collect_pod(cfg,body.namespace,body.pod,resolved_context.get('uid',''),cached,progress)
+                if not resolved_context.get('uid') and live_report.get('pod',{}).get('uid'):
+                    resolved_context['uid']=live_report['pod']['uid']
+                    db().execute('UPDATE investigations SET context=? WHERE id=?',(json.dumps(connectors.redact_structure(resolved_context),ensure_ascii=False),jid))
+                trace.extend({'tool':r['id']+' '+r['check'],'status':r['status']} for r in live_report['records'])
+                context=json.dumps(connectors.redact_structure(model_evidence(live_report)),ensure_ascii=False)
+            else:
+                context=evidence[:24000]+('\n[Контекст обрезан]' if len(evidence)>24000 else '')
+            docs = connectors.redact_structure(search_docs(body.question, body.cluster_id))
             trace.append({'tool':'Documents FTS','status':'matches '+str(len(docs))})
             incidents = db().rows('SELECT question,solution FROM incidents WHERE cluster_id=? ORDER BY created_at DESC LIMIT 3', (body.cluster_id,))
+            incidents=connectors.redact_structure([{'question':r['question'][:1500],'solution':r['solution'][:3000]} for r in incidents])
+            safe_question=connectors.redact_sensitive_text(body.question)
             messages = [
-                {'role':'system','content':SYSTEM_PROMPT+'\nСценарии проверки: '+json.dumps(selected_skills,ensure_ascii=False)},
-                {'role':'user','content':f'Контекст проблемы: {json.dumps(resolved_context,ensure_ascii=False)}\nВопрос оператора: {body.question}\nКластер: {body.cluster_id}\nСнимок: {context}\nЛоги: {logs_text}\nДокументы: {json.dumps(docs,ensure_ascii=False)}\nПодтверждённые решения: {json.dumps(incidents,ensure_ascii=False)}'}]
+                {'role':'system','content':SYSTEM_PROMPT+'\nРежим ответа: '+MODE_PROMPTS[body.mode]+'\nСценарии проверки: '+json.dumps(selected_skills,ensure_ascii=False)},
+                {'role':'user','content':f'Контекст проблемы: {json.dumps(connectors.redact_structure(resolved_context),ensure_ascii=False)}\nВопрос оператора: {safe_question}\nКластер: {body.cluster_id}\nДоказательства и выполненные проверки: {context}\nДокументы: {json.dumps(docs,ensure_ascii=False)}\nПодтверждённые решения: {json.dumps(incidents,ensure_ascii=False)}'}]
             history=[];parent=body.previous_id;seen=set();size=0
             while parent and parent not in seen and len(history)<6:
                 seen.add(parent);previous=get_investigation(parent)
                 if previous['cluster_id']!=body.cluster_id:break
-                pair=[{'role':'user','content':previous['question']},{'role':'assistant','content':previous['answer'][:6000]}]
+                pair=[{'role':'user','content':connectors.redact_sensitive_text(previous['question'])},{'role':'assistant','content':connectors.redact_sensitive_text(previous['answer'][:6000])}]
                 size+=len(json.dumps(pair))
                 if size>24000:break
                 history=pair+history;parent=previous.get('previous_id')
             messages[1:1]=history
-            for message in messages:
-                message['content'] = connectors.redact_sensitive_text(message['content'])
             if cfg.get('holmes',{}).get('enabled'):
                 answer,tool_trace=connectors.holmes_chat(cfg['holmes'],messages)
                 trace.extend(tool_trace);trace.append({'tool':'engine','status':'HolmesGPT'})
             else:
                 answer=connectors.llm_chat(llm,messages)
                 trace.append({'tool':'engine','status':'local LLM'})
+            if live_report:
+                from .diagnostics import verified_summary
+                answer=verified_summary(live_report)+'\n\n## Анализ модели по доказательствам\n'+answer
             answer=connectors.redact_sensitive_text(answer)
             db().execute('UPDATE investigations SET trace=? WHERE id=?',(json.dumps(connectors.redact_structure(trace),ensure_ascii=False),jid))
             db().execute("UPDATE investigations SET status='done',answer=? WHERE id=?", (answer,jid))
@@ -628,6 +667,8 @@ def create_app(runtime=None, polling=True):
             body.pod=resolved_context['name'] if resolved_context.get('kind')=='pods' else None
         if body.metric and not resolved_context:
             resolved_context={'metric':body.metric,'cluster_id':body.cluster_id,'title':'Утилизация '+body.metric}
+        if body.namespace and body.pod and not resolved_context:
+            resolved_context={'kind':'pods','namespace':body.namespace,'name':body.pod,'cluster_id':body.cluster_id}
         llm = db().settings().get('llm', {})
         engine=item['config'].get('holmes',{}) if item['config'].get('holmes',{}).get('enabled') else llm
         if not engine.get('url') or not engine.get('model'):
@@ -651,7 +692,7 @@ def create_app(runtime=None, polling=True):
             raise HTTPException(422,'Неизвестная метрика')
         if len(problem_id)>64:
             raise HTTPException(422,'Некорректный ID проблемы')
-        return {'items':db().rows('SELECT * FROM investigations WHERE (?=\'\' OR cluster_id=?) AND (?=\'\' OR json_extract(context,\'$.id\')=?) AND (?=\'\' OR json_extract(context,\'$.metric\')=?) ORDER BY created_at DESC LIMIT 100', (cluster_id,cluster_id,problem_id,problem_id,metric,metric))}
+        return {'items':db().rows('SELECT id,cluster_id,question,status,answer,error,created_at,previous_id,context,trace FROM investigations WHERE (?=\'\' OR cluster_id=?) AND (?=\'\' OR json_extract(context,\'$.id\')=?) AND (?=\'\' OR json_extract(context,\'$.metric\')=?) ORDER BY created_at DESC LIMIT 100', (cluster_id,cluster_id,problem_id,problem_id,metric,metric))}
 
     @api.get('/investigations/{jid}')
     def get_investigation(jid: str):
@@ -764,7 +805,20 @@ def create_app(runtime=None, polling=True):
     @app.get('/agent/{cid}/metrics')
     def agent_metrics(cid: str,request: Request,metric: str='cpu'):
         cfg=agent_config(cid,request)
-        try:return connectors.query_metrics(cfg.get('metrics',{}),metric)
+        try:return connectors.query_metrics(connectors.metrics_config(cfg),metric)
+        except connectors.ConnectorError as e:raise HTTPException(502,str(e))
+
+    @app.get('/agent/{cid}/diagnostics')
+    def agent_diagnostics(cid: str,request: Request,namespace: str,pod: str,uid: str=''):
+        cfg=agent_config(cid,request)
+        from .diagnostics import collect_pod,model_evidence
+        try:return model_evidence(collect_pod(cfg,namespace,pod,uid))
+        except connectors.ConnectorError as e:raise HTTPException(502,str(e))
+
+    @app.get('/agent/{cid}/astra-logs')
+    def agent_astra(cid: str,request: Request,namespace: str,pod: str,start: Optional[str]=None,end: Optional[str]=None):
+        cfg=agent_config(cid,request)
+        try:return connectors.astra_logs(cfg.get('astra',{}),namespace,pod,start,end)
         except connectors.ConnectorError as e:raise HTTPException(502,str(e))
 
     @app.get('/agent/{cid}/documents')

@@ -182,7 +182,7 @@ def test_llm_uses_fixed_endpoint_and_never_enables_tools(monkeypatch):
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content)
         assert "tools" not in payload
-        assert payload["max_tokens"] == 1800
+        assert payload["max_tokens"] == 3000
         assert payload["stream"] is False
         return httpx.Response(200, json={"choices": [{"message": {"content": "Observed: pod is pending."}}]})
     install_transport(monkeypatch, handler)

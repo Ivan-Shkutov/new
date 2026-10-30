@@ -32,8 +32,8 @@ def write_bundle(runtime,cid,portal_port,port,image,llm,agent_token,api_key):
     prefix=f'/agent/{cid}'
     save('config.json',{'model':'pulse-local','max_steps':6,'custom_skill_paths':['/bundle/skills'],'toolsets':{},'cluster_name':cid})
     save('http-toolset.json',{'type':'http','enabled':True,'description':'Pulse read-only tools for cluster '+cid,
-         'llm_instructions':f'Only use GET {origin}{prefix}/snapshot (kind, namespace, name), /logs (namespace,pod,container,previous), /metrics (metric allowlist), /documents (q), /incidents. Never use another cluster or execute changes.',
-         'config':{'timeout_seconds':15,'verify_ssl':True,'endpoints':[{'hosts':[origin],'paths':[prefix+'/'+p for p in ('snapshot','logs','metrics','documents','incidents','challenge')],'methods':['GET']}],
+         'llm_instructions':f'Only use GET {origin}{prefix}/diagnostics (namespace,pod,uid) for live evidence, /snapshot (kind, namespace, name), /logs (namespace,pod,container,previous), /astra-logs (namespace,pod,start,end), /metrics (metric allowlist), /documents (q), /incidents. Cite actual evidence. Never use another cluster or execute changes.',
+         'config':{'timeout_seconds':120,'verify_ssl':True,'endpoints':[{'hosts':[origin],'paths':[prefix+'/'+p for p in ('snapshot','logs','metrics','documents','incidents','challenge','diagnostics','astra-logs')],'methods':['GET']}],
                    'default_headers':{'Authorization':'Bearer '+agent_token}}})
     save('model_list.json',{'pulse-local':{'model':'openai/'+llm['model'],'api_base':llm['url'].rstrip('/')+('' if llm['url'].rstrip('/').endswith('/v1') else '/v1'),'api_key':llm.get('api_key') or 'local-no-key','custom_args':{'max_tokens':1800,'temperature':0.1,'timeout':60}}})
     save('start.py',WRAPPER)

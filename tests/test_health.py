@@ -23,6 +23,7 @@ def health(s):return summarize(s,'one','PeopleHub')['health']
 
 def pod(phase='Running',ready='True',seconds=0,reason=None):
     p={'metadata':{'name':'web','namespace':'app','creationTimestamp':stamp(seconds)},'status':{'phase':phase,'conditions':[{'type':'Ready','status':ready,'lastTransitionTime':stamp(seconds)}],'containerStatuses':[{'restartCount':37}]}}
+    if phase=='Succeeded':p['status']['containerStatuses'][0]['state']={'terminated':{'exitCode':0,'reason':'Completed'}}
     if reason:p['status']['containerStatuses'][0]['state']={'waiting':{'reason':reason}}
     return p
 

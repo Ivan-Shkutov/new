@@ -204,6 +204,8 @@ def _sanitize(value, *, depth=0):
         elif key == "env" and isinstance(item, list):
             result[key] = [{**_sanitize(v, depth=depth + 1), **({"value": "[redacted]"} if "value" in v else {})}
                            for v in item if isinstance(v, dict)]
+        elif key == "httpHeaders" and isinstance(item,list):
+            result[key] = [{"name":v.get("name",""),"value":"[redacted]"} for v in item if isinstance(v,dict)]
         else:
             result[key] = _sanitize(item, depth=depth + 1)
     return result
@@ -315,6 +317,34 @@ METRIC_EXPRESSIONS = {
 }
 
 
+def metrics_config(config):
+    source = dict(config.get('metrics', {}))
+    if source.get('transport') == 'kubernetes':
+        source['_kube'] = config['kube']
+    return source
+
+
+def metrics_configured(source):
+    return bool(source.get('url') or source.get('transport') == 'kubernetes')
+
+
+@contextmanager
+def metric_client(source):
+    if source.get('transport') == 'kubernetes':
+        ns = _name(source.get('namespace', ''), 'namespace')
+        service = _name(source.get('service', ''), 'service')
+        port = source.get('port', 9090)
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConnectorError('Некорректный порт сервиса метрик')
+        kube = source.get('_kube') or {}
+        base = _url(kube.get('server'), https_only=True) + f'/api/v1/namespaces/{ns}/services/http:{service}:{port}/proxy'
+        with _client(kube) as client:
+            yield client, base
+    else:
+        with _client(source) as client:
+            yield client, _url(source.get('url'))
+
+
 def query_metrics(settings: dict, query: str) -> dict:
     if query not in METRIC_EXPRESSIONS:
         raise ConnectorError("Unknown metric; arbitrary PromQL is not permitted")
@@ -333,8 +363,8 @@ def query_metrics(settings: dict, query: str) -> dict:
             raise ConnectorError("The mode label is reserved for node CPU selection")
         selectors.append('mode!="idle"')
     expr = METRIC_EXPRESSIONS[query].replace("{scope}", "{" + ",".join(selectors) + "}")
-    with _client(settings) as client:
-        data = _request(client, "GET", _url(settings.get("url")) + "/api/v1/query", params={"query": expr})
+    with metric_client(settings) as (client, base):
+        data = _request(client, "GET", base + "/api/v1/query", params={"query": expr})
     if not isinstance(data, dict) or data.get("status") != "success" or not isinstance(data.get("data"), dict):
         raise ConnectorError("Metrics API returned an error or invalid response")
     return {"metric": query, "data": data["data"], "empty": not bool(data["data"].get("result")), "query": expr}
@@ -351,7 +381,7 @@ def _field(row, path):
     return value
 
 
-def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = None) -> dict:
+def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = None, end: str | None = None) -> dict:
     """Astra HTTP adapter; validate payload against the installed Astra Swagger."""
     _name(namespace, "namespace")
     _name(pod, "pod")
@@ -375,11 +405,20 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
             raise ConnectorError("Astra start must be an ISO timestamp with timezone") from None
     else:
         start = (now - timedelta(hours=1)).isoformat()
+    if end is not None:
+        try:
+            end_time = datetime.fromisoformat(end.replace('Z','+00:00'))
+            if end_time.tzinfo is None or end_time <= datetime.fromisoformat(start.replace('Z','+00:00')):
+                raise ValueError()
+        except (ValueError, AttributeError):
+            raise ConnectorError('Astra end must follow start and include timezone') from None
+    else:
+        end = now.isoformat()
     expected = [cluster, namespace, pod]
     rows, scanned, truncated = [], 0, False
     with _client(settings) as client:
         for page in range(MAX_PAGES):
-            payload = {"time": {"from": start, "to": now.isoformat()},
+            payload = {"time": {"from": start, "to": end},
                        "query": " AND ".join(f"{field}:{json.dumps(value)}" for field, value in zip(fields, expected)),
                        "paging": {"page": page, "size": 250}}
             data = _request(client, "POST", _url(settings.get("url")) + "/api/v1/logs/search/monitorLogs", json=payload)
@@ -416,7 +455,7 @@ def llm_chat(settings: dict, messages: list) -> str:
         base += "/v1"
     with _client(settings, timeout=httpx.Timeout(90, connect=10)) as client:
         response = _request(client, "POST", base + "/chat/completions", json={
-            "model": model, "messages": clean, "max_tokens": 1800, "temperature": 0.1,
+            "model": model, "messages": clean, "max_tokens": 3000, "temperature": 0.1,
             "stream": False,
         })
     try:
@@ -471,8 +510,8 @@ def dashboard_metrics(settings, window='1h'):
     start, step = end - windows[window], max(30, windows[window] // 120)
     def read(metric):
         base_result = {'percent':None,'observed_at':None,'history':[],'error':None,'history_error':None}
-        with _client(settings) as client:
-            endpoint = _url(settings.get('url')) + '/api/v1/'
+        with metric_client(settings) as (client, base):
+            endpoint = base + '/api/v1/'
             for history in (False, True):
                 params = {'query':expressions[metric]}
                 if history:
@@ -496,8 +535,10 @@ def dashboard_metrics(settings, window='1h'):
                         base_result['history'] = points[:122]
                     elif points:
                         base_result['observed_at'], base_result['percent'] = points[-1]
-                except (ConnectorError, ValueError, TypeError, KeyError):
-                    base_result['history_error' if history else 'error'] = 'Не удалось получить историю метрик' if history else 'Источник не вернул корректную метрику'
+                    if not series:
+                        base_result['history_error' if history else 'error'] = 'Пустая выборка: проверьте node_exporter, scrape и labels'
+                except (ConnectorError, ValueError, TypeError, KeyError) as exc:
+                    base_result['history_error' if history else 'error'] = str(exc) if isinstance(exc, ConnectorError) else 'Источник вернул некорректную метрику'
         return metric, base_result
     with ThreadPoolExecutor(max_workers=3) as executor:
         results = dict(executor.map(read, ('cpu','ram','disk')))

@@ -1,0 +1,26 @@
+# Optional: apply once as a Kubernetes administrator on PeopleHub.
+# Allows GET only to this specific Prometheus service proxy, not every service.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pulse-prometheus-proxy
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [services/proxy]
+    resourceNames: ["http:kube-prom-kube-prometheus-prometheus:9090"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pulse-prometheus-proxy
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pulse-prometheus-proxy
+subjects:
+  - kind: ServiceAccount
+    name: pulse-reader
+    namespace: pulse-observer

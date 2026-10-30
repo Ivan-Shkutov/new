@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--password-file',type=Path,required=True)
     parser.add_argument('--screenshots',type=Path,default=Path('/tmp/pulse-compact'))
     args=parser.parse_args();args.screenshots.mkdir(parents=True,exist_ok=True)
-    data=fixture.payload('critical');data['version']='0.9.0'
+    data=fixture.payload('critical');data['version']='0.10.0'
     issues=[]
     for i in range(80):
         row=dict(data['issues'][i%len(data['issues'])]);row['name']+=f'-{i:02d}'
@@ -37,7 +37,7 @@ def main():
             assert body['cluster_id']=='peoplehub'
             if jobs:assert body['previous_id']==jobs[-1]['id']
             else:assert body['problem_id']==issues[0]['id']
-            job={'id':f'job-{len(jobs)}','cluster_id':'peoplehub','question':body['question'],'status':'done','answer':'## Вывод\nПричина пока не установлена.\n- Источник: condition Ready=False.\n<script>alert(1)</script>\n## Проверка\nСверьте логи kubelet.','context':json.dumps(issues[0]),'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
+            job={'id':f'job-{len(jobs)}','cluster_id':'peoplehub','question':body['question'],'status':'done','answer':'## Вывод\nПричина пока не установлена.\n- Источник: condition Ready=False.\n<script>alert(1)</script>\n| Проверка | Результат |\n| --- | --- |\n| UID | Тестовые данные |\n## Проверка\nСверьте логи kubelet.','context':json.dumps(issues[0]),'evidence':json.dumps({'records':[{'id':'E01','check':'Pod status (fixture)','status':'ok','method':'GET','path':'/api/v1/namespaces/application/pods/test','equivalent_command':'kubectl -n application get pod test -o json','data':{'reason':'Evicted'}}],'unavailable':0}),'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
             jobs.append(job);route.fulfill(status=202,json={'id':job['id'],'status':'queued'})
         elif '/investigations?' in route.request.url:route.fulfill(json={'items':jobs[::-1]})
         else:route.fulfill(json=jobs[-1])
@@ -91,6 +91,11 @@ def main():
         page.locator('#ai-form textarea').fill('Что проверить дальше?');page.locator('#ai-form button[type=submit]').click()
         expect(page.locator('.chat-answer')).to_have_count(2)
         assert len(last_request)==2
+        page.get_by_role('button',name='Нужные команды',exact=True).click()
+        expect(page.locator('.chat-answer')).to_have_count(3)
+        assert last_request[-1]['mode']=='commands'
+        assert page.locator('.evidence-journal').count()==3
+        assert page.locator('.analysis-table').count()==3
         page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
         page.get_by_role('button',name='Закрыть анализ',exact=True).click()
         page.locator('.problem-pager').get_by_role('button',name='→',exact=True).click()
@@ -99,7 +104,7 @@ def main():
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         assert not errors,errors
         browser.close()
-    print('PASS: one screen at 1920x1080 and 1366x768; 3/3/7 rows; real-detail contract; 80 paginated problems; context chat/follow-up; safe rendering; mobile')
+    print('PASS: one screen at 1920x1080 and 1366x768; 3/3/7 rows; real-detail contract; 80 paginated problems; context chat/follow-up/presets/evidence; safe rendering; mobile')
 
 
 if __name__=='__main__':main()

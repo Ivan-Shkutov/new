@@ -61,14 +61,22 @@ def assess(snapshot, cid, cname, workloads, interval=30, enabled=True, issue_lim
                           'version':status.get('nodeInfo',{}).get('kubeletVersion','—'),
                           'ip':next((a.get('address') for a in status.get('addresses',[]) if a.get('type')=='InternalIP'),'—')})
 
-    restarts, active_pods, ready_pods = 0,0,0
+    from .dashboard import completed_pod_ok
+    restarts, active_pods, ready_pods, completed_pods, failed_pods, unverified_pods = 0,0,0,0,0,0
     for obj in entry_items('pods'):
         m,status=obj.get('metadata',{}),obj.get('status',{})
         phase=status.get('phase','Unknown')
         containers=status.get('containerStatuses',[])+status.get('initContainerStatuses',[])
         restarts+=sum(c.get('restartCount',0) for c in containers)
-        if phase=='Failed' and not m.get('deletionTimestamp'):
-            issue('pods',obj,'warning','Pod завершился ошибкой',status.get('reason') or 'Сохранённый Failed Pod; проверьте актуальность и владельца.')
+        if phase=='Failed':
+            failed_pods += 1
+            issue('pods',obj,'critical','Pod завершился ошибкой',((status.get('reason') or 'Failed')+': '+status.get('message',''))[:2000])
+        if phase=='Succeeded':
+            if completed_pod_ok(obj):
+                completed_pods += 1
+            else:
+                unverified_pods += 1
+                issue('pods',obj,'warning','Завершение Pod не подтверждено','Succeeded без полного набора успешных exitCode; проверьте containerStatuses.')
         if phase in ('Succeeded','Failed') or m.get('deletionTimestamp'):
             continue
         active_pods+=1
@@ -136,13 +144,17 @@ def assess(snapshot, cid, cname, workloads, interval=30, enabled=True, issue_lim
         node_tone='unknown'
     for kind,value in workloads.items():
         related=[i for i in issues if i['kind']==kind]
-        value['health']='unknown' if stale or not enabled or value['total'] is None or value['partial'] else 'critical' if any(i['severity']=='critical' for i in related) else 'warning' if related else 'healthy' if value['total'] else 'neutral'
+        value['health']='unknown' if stale or not enabled or value['total'] is None or value['partial'] else 'critical' if (kind=='pods' and related) or any(i['severity']=='critical' for i in related) else 'warning' if related else 'healthy' if value['total'] else 'neutral'
         value['problems']=len(related)
     return {'status':status,'label':LABELS[status],'critical':counts['critical'],'warning':counts['warning'],
             'incomplete':incomplete,'missing':missing,'age_seconds':round(elapsed) if elapsed is not None else None,
             'nodes':{'ready':node_ready if known_nodes else None,'total':nodes_total,'health':node_tone},
             'pods':{'ready':ready_pods if resources.get('pods') and not resources['pods'].get('error') else None,
                     'active':active_pods if resources.get('pods') and not resources['pods'].get('error') else None,
+                    'total':len(entry_items('pods')) if resources.get('pods') and not resources['pods'].get('error') else None,
+                    'healthy':ready_pods+completed_pods if resources.get('pods') and not resources['pods'].get('error') else None,
+                    'completed':completed_pods,'failed':failed_pods,'unverified':unverified_pods,
+                    'health':'unknown' if stale or not enabled or resources.get('pods',{}).get('error') or resources.get('pods',{}).get('truncated') or 'pods' not in resources else 'critical' if any(i['kind']=='pods' for i in issues) else 'healthy',
                     'restarts':restarts,'restart_note':'Сумма счётчиков текущих Pod; не частота за интервал'},
             'node_rows':node_rows,'events':events[:10],'issues':issues if issue_limit is None else issues[:issue_limit],'issues_total':len(issues)}
 

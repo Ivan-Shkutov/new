@@ -68,6 +68,8 @@ def upstream(tmp_path):
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 return self.wfile.write(body)
+            if self.path == '/api/v1/namespaces/default/pods/web':
+                return self.respond({'metadata':{'name':'web','namespace':'default','uid':'pod-uid'},'spec':{'containers':[{'name':'web'}]},'status':{'phase':'Pending'}})
             if self.path.startswith('/api/v1/pods?'):
                 return self.respond({'metadata': {}, 'items': [{'kind': 'Pod', 'metadata': {'name': 'web', 'namespace': 'default', 'uid': 'pod-uid'}, 'status': {'phase': 'Pending'}, 'spec': {'containers': [{'name': 'web', 'env': [{'name': 'PASSWORD', 'value': 'hidden-value'}]}]}}]})
             return self.respond({'metadata': {}, 'items': []})
@@ -144,6 +146,7 @@ def test_https_cluster_to_grounded_investigation_and_restart(upstream, tmp_path,
                 break
             time.sleep(.02)
         assert job['status'] == 'done', job
+        assert 'readiness failed' in job['evidence'], job['evidence']
         sent = json.dumps(observations['llm'], ensure_ascii=False)
         assert 'readiness failed' in sent and 'guide.md' in sent
         assert 'do-not-send-to-model' not in sent and 'hidden-value' not in sent

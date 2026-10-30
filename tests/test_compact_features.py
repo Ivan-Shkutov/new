@@ -36,6 +36,8 @@ def test_issue_context_trace_and_followup_survive_resolution(client,monkeypatch)
     client.post('/api/clusters/one/refresh',headers=MUTATION)
     problem=client.get('/api/problems').json()['items'][0]
     client.put('/api/settings',json={'llm':{'url':'http://localhost:8002/v1','model':'qwen'}},headers=MUTATION)
+    from pulse_app import diagnostics
+    monkeypatch.setattr(diagnostics,'collect_pod',lambda *a,**kw:{'records':[],'findings':[],'unavailable':0})
     messages=[]
     monkeypatch.setattr(connectors,'resource_logs',lambda *a,**k:'readiness failed')
     def llm(cfg,m):messages.append(m);return 'Наблюдение: CrashLoop. Причина пока не установлена.'
@@ -164,6 +166,6 @@ def test_upgrade_old_database_preserves_history_and_encryption(tmp_path):
     upgraded=Store(tmp_path)
     job=upgraded.rows('SELECT * FROM investigations')[0]
     assert job['answer']=='Прежний ответ' and job['status']=='done'
-    assert json.loads(job['context'])=={} and json.loads(job['trace'])=={}
+    assert json.loads(job['context'])=={} and json.loads(job['trace'])=={} and json.loads(job['evidence'])=={}
     assert (tmp_path/'registry.key').read_bytes()==original_key
     assert upgraded.settings()['llm']['api_key']=='private'
