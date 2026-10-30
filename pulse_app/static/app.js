@@ -4,7 +4,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {page: 'overview', cluster: '', clusters: [], snapshot: null, overview: [], editingCluster: null, logs: null, resolving: null, previousId: null, loadSequence: 0, pollBusy: false};
 try { state.cluster = localStorage.getItem('pulse.cluster') || ''; } catch (_) { /* Storage can be unavailable in private browser contexts. */ }
-const titles = {overview: 'Обзор кластеров', resources: 'Ресурсы Kubernetes', investigations: 'Расследования', knowledge: 'База знаний', settings: 'Настройки'};
+const titles = {overview: 'Обзор кластеров', resources: 'Ресурсы Kubernetes', investigations: 'Расследования', knowledge: 'База знаний', settings: 'Настройки', chat:'Чат с ИИ'};
 const typeNames = {pods: 'Pods', nodes: 'Nodes', namespaces: 'Namespaces'};
 
 function node(tag, className, text) {
@@ -90,6 +90,7 @@ async function loadPage() {
     else if (state.page === 'investigations') await loadInvestigations();
     else if (state.page === 'knowledge') await loadKnowledge();
     else if (state.page === 'settings') await loadSettings();
+    else if (state.page === 'chat') await openAnalysis({cluster_id:state.cluster,chat:true});
   } catch (error) { if (sequence === state.loadSequence) globalError(error); }
 }
 const workloadNames = {daemonsets:'DaemonSets',deployments:'Deployments',jobs:'Jobs',cronjobs:'CronJobs',replicasets:'ReplicaSets',statefulsets:'StatefulSets',pods:'Pods'};
@@ -312,9 +313,10 @@ async function loadInvestigations() {
   });
 }
 async function loadKnowledge(query = '') {
+  await loadVectorKnowledge();
   const target = clear('#document-list'); const scope = encodeURIComponent(state.cluster);
   const data = await api(query ? `/documents/search?q=${encodeURIComponent(query)}&cluster_id=${scope}` : `/documents?cluster_id=${scope}`);
-  if (!(data.items || []).length) target.append(empty(query ? 'Совпадений нет' : 'Добавьте первый документ', query ? 'Попробуйте точное имя сервиса или фрагмент ошибки. Лексический поиск не гарантирует перевод между языками.' : 'Загрузите описание приложения и инструкции. Общие документы доступны при выборе любого кластера.'));
+  if (!(data.items || []).length) target.append(empty(query ? 'В загруженных файлах совпадений нет' : 'Добавьте первый документ', query ? 'Попробуйте точное имя сервиса или фрагмент ошибки. Лексический поиск не гарантирует перевод между языками.' : 'Загрузите описание приложения и инструкции. Общие документы доступны при выборе любого кластера.'));
   (data.items || []).forEach(item => {
     const card = node('article', 'item-card');
     card.append(append(node('div', 'section-heading'), node('h3', '', item.name || item.filename || 'Документ'), node('span', 'chip', item.cluster_id || 'Общий')));
@@ -454,14 +456,53 @@ function safeAnswer(text){
  }
  return root;
 }
-function showAnalysisJobs(jobs){const root=clear('#ai-conversation');for(const job of jobs){const turn=node('article','chat-turn');turn.append(node('div','chat-question',job.question));if(job.answer){if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Ответ поступает; анализ ещё не завершён.':'Незавершённый ответ — анализ не подтверждён.','warning');turn.append(safeAnswer(job.answer));}if(job.error)notice(turn,job.error,'error');if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));const trace=readJson(job.trace,[]);if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}const evidence=readJson(job.evidence,{});if(evidence.records)showEvidence(turn,evidence);else turn.append(button('Журнал проверок',async()=>{try{const full=await api('/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));root.append(turn);}root.scrollTop=root.scrollHeight;}
-async function openAnalysis(context){clearTimeout(analysisTimer);const sequence=++analysisSequence;analysisState={context,previous:null,jobs:[]};$('#ai-title').textContent='✧ Анализ проблемы';$('#ai-context').textContent=`${context.cluster_name||context.cluster_id} · ${context.namespace||context.kind||context.metric||'кластер'} · ${context.name||context.title||''}\n${context.title||''}${context.stale?' · исходный снимок устарел':''}`;$('#ai-form').reset();$('#ai-status').textContent='';$('#ai-form button[type=submit]').disabled=false;clear('#ai-conversation').append(node('p','muted','Задайте вопрос. ИИ получит контекст выбранной проблемы и доступные факты.'));if(!$('#ai-dialog').open)$('#ai-dialog').showModal();
- try{const historyParams=new URLSearchParams({cluster_id:context.cluster_id});if(context.id)historyParams.set('problem_id',context.id);if(context.metric)historyParams.set('metric',context.metric);const result=await api('/investigations?'+historyParams);if(sequence!==analysisSequence)return;const jobs=(result.items||[]).filter(job=>{const ctx=readJson(job.context,{});return context.id?ctx.id===context.id:context.metric?ctx.metric===context.metric:false;}).reverse();analysisState.jobs=jobs;if(jobs.length){showAnalysisJobs(jobs);const last=jobs[jobs.length-1];if(last.status==='done')analysisState.previous=last.id;else if(['queued','running'].includes(last.status))pollAnalysis(last.id,sequence);}}
- catch(e){$('#ai-status').textContent=errorText(e);}}
-async function pollAnalysis(id,sequence){if(sequence!==analysisSequence||!$('#ai-dialog').open)return;$('#ai-form button[type=submit]').disabled=true;try{const job=await api(`/investigations/${encodeURIComponent(id)}`);if(sequence!==analysisSequence)return;const index=analysisState.jobs.findIndex(j=>j.id===id);if(index<0)analysisState.jobs.push(job);else analysisState.jobs[index]=job;showAnalysisJobs(analysisState.jobs);$('#ai-status').textContent={done:'Ответ готов',failed:'Анализ не завершён',interrupted:'Задание прервано',queued:'В очереди',running:'Анализ…'}[job.status]||job.status;if(['queued','running'].includes(job.status)){analysisTimer=setTimeout(()=>pollAnalysis(id,sequence),2000);}else{$('#ai-form button[type=submit]').disabled=false;if(job.status==='done')analysisState.previous=id;}}
- catch(e){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}}
-$('#ai-dialog').addEventListener('close',()=>{clearTimeout(analysisTimer);analysisSequence++;});
-$('#ai-form').addEventListener('submit',async event=>{event.preventDefault();if(!analysisState)return;const sequence=analysisSequence,context=analysisState.context,body={cluster_id:context.cluster_id,question:event.currentTarget.elements.question.value.trim(),mode:event.currentTarget.elements.analysis_mode.value};if(analysisState.previous)body.previous_id=analysisState.previous;else if(context.id)body.problem_id=context.id;if(context.metric)body.metric=context.metric;$('#ai-form button[type=submit]').disabled=true;try{const job=await api('/investigations',{method:'POST',body});if(sequence!==analysisSequence)return;$('#ai-form').reset();await pollAnalysis(job.id,sequence);}catch(e){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}});
+function showAnalysisJobs(jobs){const root=clear('#ai-conversation');for(const job of jobs){const turn=node('article','chat-turn');turn.append(node('div','chat-question',job.question));if(job.answer){if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Ответ поступает; анализ ещё не завершён.':'Незавершённый ответ — анализ не подтверждён.','warning');turn.append(safeAnswer(job.answer));}if(job.error)notice(turn,job.error,'error');if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));const trace=readJson(job.trace,[]);if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}const evidence=readJson(job.evidence,{});if(evidence.records)showEvidence(turn,evidence);else if(!analysisState?.context?.chat) turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));root.append(turn);}root.scrollTop=root.scrollHeight;}
+function forgetAnalysis(){
+ clearTimeout(analysisTimer);analysisSequence++;
+ const sid=analysisState?.session;analysisState=null;
+ clear('#ai-conversation');$('#ai-form').reset();$('#ai-status').textContent='';$('#ai-context').textContent='';
+ if(sid)fetch(`/api/sessions/${encodeURIComponent(sid)}`,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});
+}
+async function openAnalysis(context){
+ forgetAnalysis();const sequence=++analysisSequence;
+ analysisState={context,session:null,previous:null,jobs:[]};
+ $('#ai-title').textContent=context.chat?'✧ Чат с ИИ':'✧ Анализ проблемы';
+ $('#ai-context').textContent=context.chat?`${context.cluster_id&&$('#chat-engine').value==='cluster'?'Движок выбранного кластера: '+context.cluster_id:'Локальная модель напрямую'} · временный диалог. Закрытие удалит переписку из Pulse.`:`${context.cluster_name||context.cluster_id} · ${context.namespace||context.kind||context.metric||'кластер'} · ${context.name||context.title||''}\n${context.title||''} · без сохранения истории`;
+ $('#ai-form .ai-presets').classList.toggle('hidden',!!context.chat);
+ $('#ai-form [name=analysis_mode]').closest('label').classList.toggle('hidden',!!context.chat);
+ $('#ai-form textarea').placeholder=context.chat?'Задайте любой вопрос…':'В чём причина и что проверить первым?';
+ $('#ai-form button[type=submit]').disabled=true;
+ clear('#ai-conversation').append(node('p','muted',context.chat?'Новый диалог. Можно задать любой вопрос.':'Новый анализ. ИИ получит контекст выбранной проблемы и доступные доказательства.'));
+ if(!$('#ai-dialog').open)$('#ai-dialog').showModal();
+ try{const result=await api('/sessions',{method:'POST',body:{cluster_id:context.cluster_id||'',mode:context.chat?'chat':'problem',engine:context.chat?$('#chat-engine').value:'cluster'}});
+  if(sequence!==analysisSequence){fetch('/api/sessions/'+result.id,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});return;}
+  analysisState.session=result.id;$('#ai-form button[type=submit]').disabled=false;
+ }catch(e){if(sequence===analysisSequence)$('#ai-status').textContent=errorText(e);}
+}
+async function pollAnalysis(id,sequence){
+ if(sequence!==analysisSequence||!$('#ai-dialog').open||!analysisState?.session)return;
+ $('#ai-form button[type=submit]').disabled=true;
+ try{const job=await api(`/sessions/${analysisState.session}/jobs/${encodeURIComponent(id)}`);if(sequence!==analysisSequence)return;
+ const index=analysisState.jobs.findIndex(j=>j.id===id);if(index<0)analysisState.jobs.push(job);else analysisState.jobs[index]=job;
+ showAnalysisJobs(analysisState.jobs);
+ $('#ai-status').textContent={done:'Ответ готов',failed:'Анализ не завершён',queued:'В очереди',running:'Анализ…'}[job.status]||job.status;
+ if(['queued','running'].includes(job.status))analysisTimer=setTimeout(()=>pollAnalysis(id,sequence),1000);
+ else{$('#ai-form button[type=submit]').disabled=false;if(job.status==='done')analysisState.previous=id;}
+ }catch(e){if(sequence===analysisSequence){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}}
+}
+$('#ai-dialog').addEventListener('close',forgetAnalysis);
+window.addEventListener('pagehide',forgetAnalysis);
+$('#new-chat').addEventListener('click',()=>openAnalysis({cluster_id:state.cluster,chat:true}));
+$('#ai-form').addEventListener('submit',async event=>{
+ event.preventDefault();if(!analysisState?.session)return;
+ const sequence=analysisSequence,context=analysisState.context,sid=analysisState.session;
+ const body={question:event.currentTarget.elements.question.value.trim(),mode:event.currentTarget.elements.analysis_mode.value};
+ if(context.id&&!analysisState.jobs.length)body.problem_id=context.id;if(context.metric)body.metric=context.metric;
+ $('#ai-form button[type=submit]').disabled=true;
+ try{const job=await api(`/sessions/${sid}/messages`,{method:'POST',body});if(sequence!==analysisSequence)return;
+ $('#ai-form textarea').value='';await pollAnalysis(job.id,sequence);
+ }catch(e){if(sequence===analysisSequence){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}}
+});
 
 $('#holmes-bootstrap').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');try{const port=Number($('#cluster-form').elements.holmes_port.value);const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-bootstrap`,{method:'POST',body:{port}});out.textContent=`Создан runtime/${result.relative_path}. Запустите compose этого каталога на сервере. Затем заново откройте настройки кластера и проверьте ответ Holmes.`;await loadClusters();}catch(e){out.textContent=errorText(e);}}));
 $('#holmes-test').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');out.textContent='Проверяем сохранённое подключение…';try{const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-test`,{method:'POST'});out.textContent='Holmes ответил: '+result.answer;}catch(e){out.textContent=errorText(e);}}));
@@ -511,3 +552,26 @@ function openNodeDashboard(){
  tr.append(append(node('td'),node('strong','',n.name),node('small','metadata',`${n.ip||'—'} · ${c.name}`)),append(node('td'),healthBadge(tone)),append(node('td'),environment),node('td','',`${num(n.capacity?.cpu)} / ${num(n.allocatable?.cpu)} vCPU`),node('td','',`${memory(n.capacity?.memory)} / ${memory(n.allocatable?.memory)}`),budget);body.append(tr);}
  table.append(body);target.append(append(node('div','table-wrap'),table));if(!body.children.length)notice(target,'Нет полного снимка узлов. Проверьте сбор и права.','warning');
 }
+
+let vectorOffset=0;
+async function loadVectorKnowledge(query=''){
+ const target=clear('#vector-documents');
+ try{
+  const status=await api('/knowledge/status');$('#vector-status').textContent=status.configured?`${status.model} · Qdrant ${status.qdrant||'—'}`:'Qdrant не настроен';
+  if(!status.configured){notice(target,'Подключите локальные Qdrant и embeddings по инструкции Docker.');return;}
+  if(query){const result=await api('/knowledge/search?'+new URLSearchParams({q:query,cluster_id:state.cluster}));notice(target,result.note);
+   for(const d of result.items)target.append(append(node('article','item-card'),node('h3','',`${d.name} · ${d.product} ${d.version}`),node('small','metadata',d.source),node('p','',d.excerpt)));
+   return;
+  }
+  const result=await api('/knowledge/documents?'+new URLSearchParams({cluster_id:state.cluster,offset:vectorOffset,limit:25}));
+  target.append(node('p','muted',`Документов: ${result.total}`));const table=node('table');table.append(append(node('thead'),append(node('tr'),...['Документ','Продукт / версия','Индексация','Действия'].map(x=>node('th','',x)))));const body=node('tbody');
+  for(const d of result.items){const view=button('Открыть',async()=>{try{const full=await api('/knowledge/documents/'+d.id);const out=detailShell(d.name);out.append(node('p','muted',`${full.source} · ${full.product} ${full.version} · ${full.language}`),node('pre','document-body',full.body));}catch(e){toast(errorText(e));}});
+   const remove=button('Удалить',async()=>{if(!confirm('Удалить документ из векторной базы?'))return;await api('/knowledge/documents/'+d.id,{method:'DELETE'});loadVectorKnowledge();},'danger small');
+   body.append(append(node('tr'),node('td','',d.name),node('td','',`${d.product} ${d.version} · ${d.language}`),node('td','',d.status+(d.error?' · '+d.error:'')),append(node('td'),view,remove)));
+  }
+  table.append(body);target.append(append(node('div','table-wrap'),table));const prev=button('←',()=>{vectorOffset=Math.max(0,vectorOffset-25);loadVectorKnowledge();}),next=button('→',()=>{vectorOffset+=25;loadVectorKnowledge();});prev.disabled=!vectorOffset;next.disabled=vectorOffset+25>=result.total;target.append(append(node('div','actions'),prev,next));
+ }catch(e){notice(target,errorText(e),'warning');}
+}
+$('#vector-upload-form').addEventListener('submit',event=>{event.preventDefault();const form=event.currentTarget;busy(form.querySelector('[type=submit]'),async()=>{try{const file=form.elements.file.files[0];if(!file||file.size>2_000_000)throw new Error('Выберите текстовый документ до 2 MB');await api('/knowledge/documents',{method:'POST',body:{name:file.name,body:await file.text(),source:form.elements.source.value,product:form.elements.product.value,version:form.elements.version.value,cluster_id:state.cluster,language:'ru'}});message(form,'Документ проиндексирован',true);await loadVectorKnowledge();}catch(e){message(form,errorText(e));}});});
+
+$('#vector-search-form').addEventListener('submit',event=>{event.preventDefault();vectorOffset=0;loadVectorKnowledge(event.currentTarget.elements.q.value.trim());});

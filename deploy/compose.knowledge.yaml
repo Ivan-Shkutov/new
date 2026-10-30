@@ -1,0 +1,24 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.5@sha256:0fb8897412abc81d1c0430a899b9a81eb8328aa634e7242d1bc804c1fe8fe863
+    restart: unless-stopped
+    ports: ["127.0.0.1:16333:6333"]
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes: [qdrant_data:/qdrant/storage]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+  embeddings:
+    image: ollama/ollama:0.13.5@sha256:6f5589597ef2cd6abb94cd34221ef46a880a4c5393973a646979e7804eb8b573
+    restart: unless-stopped
+    ports: ["127.0.0.1:11435:11434"]
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes: [embedding_models:/root/.ollama]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+volumes:
+  qdrant_data:
+  embedding_models:

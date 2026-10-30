@@ -1,0 +1,13 @@
+{
+  "origin": "https://github.com/kubernetes/website.git",
+  "commit": "c28dcd8393562ddc6adf89b920ad3c396166a31b",
+  "version": "1.30",
+  "languages": {
+    "en": 1343,
+    "ru": 135
+  },
+  "documents": 1478,
+  "sha256": "e4fae6abc29334695a27e78dfa15d340acdd681bfaa15aa22ee8634fdae9b405",
+  "license": "CC BY 4.0; Kubernetes Authors",
+  "scope": "All Markdown files in content/en/docs and content/ru/docs. Not images, generated external API references, translations outside these directories, or examples fetched from external links."
+}

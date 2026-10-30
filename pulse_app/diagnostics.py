@@ -130,6 +130,12 @@ class Collector:
             for vol in spec.get('volumes',[])[:8]:
                 claim=vol.get('persistentVolumeClaim',{}).get('claimName')
                 if claim:self.get(client,'PVC Pod',prefix+'/persistentvolumeclaims/'+c._name(claim,'PVC'),f'kubectl -n {ns} get pvc {claim} -o json')
+            labels=meta.get('labels') or {}
+            services,_=self.get(client,'Services и selectors Pod',prefix+'/services',f'kubectl -n {ns} get services -o json',{'limit':100},project=lambda data:{'items':[svc for svc in data.get('items',[]) if svc.get('spec',{}).get('selector') and all(labels.get(k)==v for k,v in svc['spec']['selector'].items())],'truncated':bool(data.get('metadata',{}).get('continue'))})
+            for svc in [s for s in (services or {}).get('items',[]) if s.get('spec',{}).get('selector') and all(labels.get(k)==v for k,v in s['spec']['selector'].items())][:5]:
+                service=c._name(svc.get('metadata',{}).get('name'),'service')
+                self.get(client,'Endpoints сервиса '+service,prefix+'/endpoints/'+service,f'kubectl -n {ns} get endpoints {service} -o json')
+            self.get(client,'NetworkPolicies namespace',f'/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies',f'kubectl -n {ns} get networkpolicies -o json',{'limit':100},project=lambda data:{'items':data.get('items',[]),'truncated':bool(data.get('metadata',{}).get('continue'))})
         containers=status.get('initContainerStatuses',[])+status.get('containerStatuses',[])
         known={container.get('name') for container in containers}
         containers += [{'name':container['name']} for container in spec.get('initContainers',[])+spec.get('containers',[]) if container.get('name') and container['name'] not in known]

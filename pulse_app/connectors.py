@@ -464,17 +464,24 @@ def llm_chat(settings: dict, messages: list) -> str:
     base = _url(settings.get("url"))
     if not base.endswith("/v1"):
         base += "/v1"
-    with _client(settings, timeout=httpx.Timeout(90, connect=10)) as client:
+    with _client(settings, timeout=httpx.Timeout(180, connect=10)) as client:
         response = _request(client, "POST", base + "/chat/completions", json={
-            "model": model, "messages": clean, "max_tokens": 3000, "temperature": 0.1,
+            "model": model, "messages": clean, "max_tokens": 6000, "temperature": 0.1,
             "stream": False,
         })
     try:
-        result = response["choices"][0]["message"]["content"]
+        choice = response["choices"][0]
+        message = choice["message"]
+        result = message["content"]
     except (KeyError, IndexError, TypeError):
         raise ConnectorError("LLM returned an unsupported completion response") from None
     if not isinstance(result, str) or not result.strip():
         raise ConnectorError("LLM returned no text; tools and autonomous actions are not enabled")
+    if message.get('tool_calls') or message.get('function_call'):
+        raise ConnectorError('Local LLM requested tools; native mode never executes model commands')
+    if choice.get('finish_reason') not in (None,'stop'):
+        from .astra_ai import IncompleteAnswer
+        raise IncompleteAnswer('Локальная модель не завершила ответ: '+str(choice['finish_reason'])[:40],result)
     return result
 
 

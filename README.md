@@ -1,10 +1,16 @@
-# Pulse Clusters 0.12.0
+# Pulse Clusters 0.13.0
 
 Самостоятельная панель наблюдения за Kubernetes: несколько кластеров, 22 типа ресурсов, метрики Prometheus/VictoriaMetrics, логи Kubernetes и адаптер логов Astra, контекстные вопросы локальной LLM, документы с полнотекстовым поиском, история расследований и подтверждённые решения.
 
 **Начните с [пошаговой инструкции для вашего сервера](START-HERE-RU.md).** [Полная установка и эксплуатация](docs/INSTALL-RU.md). [Подключить кластер и проверить работу](docs/CONNECT-CLUSTER-RU.md) · [Проверки выпуска](docs/QA-RU.md) · [Контракты интеграций](docs/CONNECTORS-RU.md).
 
 [Команды для изучения кластера и выбора показателей Pulse](docs/CLUSTER-INVENTORY-RU.md). [Разбор снимка PeopleHub 30.10.2026](docs/PEOPLEHUB-REVIEW-2026-10-30-RU.md).
+
+## ИИ и переносимый Docker-комплект 0.13.0
+
+✧ открывает временный диалог без записи в историю; отдельный чат работает напрямую с локальной LLM. Qdrant с multilingual embeddings, 1478 официальных документов Kubernetes 1.30, импорт VK Teams/SaaS, 12 сценариев read-only анализа и внутренний HTTPS-домен.
+
+[Применить обновление](docs/UPDATE-0.13.0-RU.md) · [ИИ и база знаний](docs/AI-KNOWLEDGE-RU.md) · [pulse-clusters.plagate.ru и Docker-перенос](docs/DEPLOY-DOMAIN-RU.md).
 
 ## Обзор 0.12.0 — состояние кластера на одном экране
 
@@ -75,7 +81,7 @@ cat runtime/secrets/portal-password
 - Docker, CLI init/start/stop/check/backup/restore/export-image, RBAC reader и экспорт краткосрочного kubeconfig.
 - Зависимости закреплены с хешами; базовый образ закреплён digest.
 
-Это новая реализация, а не исходники прежнего 0.5.0. Нет многопользовательского RBAC/OIDC, автоматических исправлений, AURA, PostgreSQL/Qdrant или Astra incidents. HolmesGPT подключается отдельно по [инструкции](docs/HOLMES-RU.md); реальный контейнер не проверен в текущей среде из-за запрета его registry. Обновление прежних установок Pulse использует backup/restore, не удаление runtime. Astra logs требует bearer token; совместимость с реальной версией сервера проверяется отдельно. LLM, модельные веса, Docker Engine и Kubernetes устанавливаются отдельно.
+Это новая реализация, а не исходники прежнего 0.5.0. Нет многопользовательского RBAC/OIDC, автоматических исправлений, AURA, PostgreSQL или Astra incidents. HolmesGPT подключается отдельно по [инструкции](docs/HOLMES-RU.md); реальный контейнер не проверен в текущей среде из-за запрета его registry. Обновление прежних установок Pulse использует backup/restore, не удаление runtime. Astra logs требует bearer token; совместимость с реальной версией сервера проверяется отдельно. LLM, модельные веса, Docker Engine и Kubernetes устанавливаются отдельно.
 
 Документы в `docs/imported` и `docs/review` относятся к прежнему описанию 0.5.0 и не являются инструкцией для этого выпуска. Настоящий путь установки — `docs/INSTALL-RU.md`.
 

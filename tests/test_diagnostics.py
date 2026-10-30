@@ -12,7 +12,7 @@ from test_compact_features import wait
 
 
 def failed_pod():
-    return {'metadata':{'name':'bad','namespace':'am-agent','uid':'old-uid','ownerReferences':[{'kind':'ReplicaSet','name':'rs-old','uid':'rs-uid','controller':True}]},
+    return {'metadata':{'name':'bad','namespace':'am-agent','uid':'old-uid','labels':{'app':'agent'},'ownerReferences':[{'kind':'ReplicaSet','name':'rs-old','uid':'rs-uid','controller':True}]},
             'spec':{'nodeName':'worker-2','containers':[{'name':'agent','image':'agent:1','resources':{'requests':{'ephemeral-storage':'100Mi'}}}]},
             'status':{'phase':'Failed','reason':'Evicted','message':'The node was low on resource: ephemeral-storage. Container agent was using 3Gi.',
                       'containerStatuses':[{'name':'agent','restartCount':1,'state':{'terminated':{'reason':'Error','exitCode':137,'finishedAt':'2026-10-30T07:00:00Z'}}}]}}
@@ -32,6 +32,9 @@ def upstream_handler(request):
         body=json.loads(request.content);assert body['time']['from']<'2026-10-30T07:00:00' and body['time']['to']>'2026-10-30T07:00:00'
         return httpx.Response(200,json={'items':[{'labels.cluster':'peoplehub','labels.k8s.namespace.name':'am-agent','labels.k8s.pod.name':'bad','message':'our eviction log'}, {'labels.cluster':'other','message':'foreign-secret'}]})
     if path.endswith('/api/v1/query_range'):return httpx.Response(200,json={'status':'success','data':{'resultType':'matrix','result':[]}})
+    if path.endswith('/services'):return httpx.Response(200,json={'items':[{'metadata':{'name':'matching'},'spec':{'selector':{'app':'agent'}}},{'metadata':{'name':'foreign'},'spec':{'selector':{'app':'other'}}}]})
+    if path.endswith('/endpoints/matching'):return httpx.Response(200,json={'subsets':[]})
+    if path.endswith('/networkpolicies'):return httpx.Response(200,json={'items':[]})
     if path.endswith('/events'):
         if '/namespaces/' in path:assert request.url.params['fieldSelector']=='involvedObject.uid=old-uid'
         return httpx.Response(200,json={'items':[{'reason':'Evicted','message':'ephemeral-storage','lastTimestamp':'2026-10-30T07:00:01Z'}]})

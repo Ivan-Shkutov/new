@@ -1,0 +1,7 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    pull_policy: never
+  embeddings:
+    image: ollama/ollama:0.13.5
+    pull_policy: never

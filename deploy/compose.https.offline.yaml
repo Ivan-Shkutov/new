@@ -1,0 +1,4 @@
+services:
+  https:
+    image: caddy:2.10.2
+    pull_policy: never

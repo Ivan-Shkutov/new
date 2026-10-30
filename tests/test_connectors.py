@@ -182,7 +182,7 @@ def test_llm_uses_fixed_endpoint_and_never_enables_tools(monkeypatch):
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content)
         assert "tools" not in payload
-        assert payload["max_tokens"] == 3000
+        assert payload["max_tokens"] == 6000
         assert payload["stream"] is False
         return httpx.Response(200, json={"choices": [{"message": {"content": "Observed: pod is pending."}}]})
     install_transport(monkeypatch, handler)
@@ -211,3 +211,20 @@ def test_collection_deadline_marks_all_remaining_resources(monkeypatch):
     assert len(result["resources"]) == len(c.RESOURCE_PATHS)
     assert all(row["error"] == "Collection time budget exceeded" for row in result["resources"].values())
     assert not result["complete"]
+
+
+@pytest.mark.parametrize('tool_call',[False,True])
+def test_local_llm_marks_token_limit_as_incomplete_and_never_executes_tools(monkeypatch,tool_call):
+    from pulse_app.astra_ai import IncompleteAnswer
+    def response(request):
+        message={'content':'partial answer'}
+        if tool_call:message['tool_calls']=[{'id':'bad'}]
+        return httpx.Response(200,json={'choices':[{'message':message,'finish_reason':'tool_calls' if tool_call else 'length'}]})
+    install_transport(monkeypatch,response)
+    if tool_call:
+        with pytest.raises(c.ConnectorError,match='never executes'):
+            c.llm_chat({'url':'http://127.0.0.1:8002/v1','model':'qwen'},[{'role':'user','content':'question'}])
+    else:
+        with pytest.raises(IncompleteAnswer) as caught:
+            c.llm_chat({'url':'http://127.0.0.1:8002/v1','model':'qwen'},[{'role':'user','content':'question'}])
+        assert caught.value.partial=='partial answer'

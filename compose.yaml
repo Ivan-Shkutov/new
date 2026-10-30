@@ -1,6 +1,6 @@
 services:
   pulse:
-    image: pulse-clusters:0.12.0
+    image: pulse-clusters:0.13.0
     build:
       context: .
       args:
@@ -19,6 +19,14 @@ services:
       PULSE_RUNTIME: /runtime
       PULSE_PASSWORD_FILE: /runtime/secrets/portal-password
       PULSE_USERNAME: ${PULSE_USERNAME:-pulse}
+      PULSE_QDRANT_URL: ${PULSE_QDRANT_URL:-}
+      PULSE_EMBEDDINGS_URL: ${PULSE_EMBEDDINGS_URL:-}
+      PULSE_EMBEDDINGS_MODEL: ${PULSE_EMBEDDINGS_MODEL:-bge-m3}
+      PULSE_EMBEDDINGS_PROVIDER: ${PULSE_EMBEDDINGS_PROVIDER:-ollama}
+      PULSE_EMBEDDINGS_REVISION: ${PULSE_EMBEDDINGS_REVISION:-}
+      PULSE_EMBEDDINGS_DIMENSION: ${PULSE_EMBEDDINGS_DIMENSION:-1024}
+      PULSE_QDRANT_KEY_FILE: ${PULSE_QDRANT_KEY_FILE:-}
+      PULSE_EMBEDDINGS_KEY_FILE: ${PULSE_EMBEDDINGS_KEY_FILE:-}
       PULSE_POLL_SECONDS: ${PULSE_POLL_SECONDS:-30}
     command: [python, -m, uvicorn, "pulse_app.app:app", --host, "127.0.0.1", --port, "${PULSE_PORT:-8090}"]
     healthcheck:

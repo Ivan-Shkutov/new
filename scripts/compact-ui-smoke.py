@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--password-file',type=Path,required=True)
     parser.add_argument('--screenshots',type=Path,default=Path('/tmp/pulse-compact'))
     args=parser.parse_args();args.screenshots.mkdir(parents=True,exist_ok=True)
-    data=fixture.payload('overview');data['version']='0.12.0'
+    data=fixture.payload('overview');data['version']='0.13.0'
     issues=[]
     for i in range(80):
         row=dict(data['issues'][i%len(data['issues'])]);row['name']+=f'-{i:02d}'
@@ -35,9 +35,7 @@ def main():
     def job_route(route):
         if route.request.method=='POST':
             body=route.request.post_data_json;last_request.append(body)
-            assert body['cluster_id']=='peoplehub'
-            if jobs:assert body['previous_id']==jobs[-1]['id']
-            else:assert body['problem_id']==issues[0]['id']
+            if not jobs:assert body['problem_id']==issues[0]['id']
             job={'id':f'job-{len(jobs)}','cluster_id':'peoplehub','question':body['question'],'status':'done','answer':'## Вывод\nПричина пока не установлена.\n- Источник: condition Ready=False.\n<script>alert(1)</script>\n| Проверка | Результат |\n| --- | --- |\n| UID | Тестовые данные |\n## Проверка\nСверьте логи kubelet.','context':json.dumps(issues[0]),'evidence':json.dumps({'records':[{'id':'E01','check':'Pod status (fixture)','status':'ok','method':'GET','path':'/api/v1/namespaces/application/pods/test','equivalent_command':'kubectl -n application get pod test -o json','data':{'reason':'Evicted'}}],'unavailable':0}),'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
             jobs.append(job);route.fulfill(status=202,json={'id':job['id'],'status':'queued'})
         elif '/investigations?' in route.request.url:route.fulfill(json={'items':jobs[::-1]})
@@ -57,6 +55,15 @@ def main():
         page.route('**/api/problems?*',problem_route)
         page.route('**/api/investigations**',job_route)
         page.route('**/api/investigations/*',job_route)
+        closed=[]
+        def sessions_route(route):
+            if route.request.method=='POST':
+                jobs.clear();route.fulfill(status=201,json={'id':'volatile-'+str(len(closed)),'persistent':False})
+            else:closed.append(route.request.url);route.fulfill(json={'ok':True})
+        page.route('**/api/sessions',sessions_route)
+        page.route('**/api/sessions/*',sessions_route)
+        page.route('**/api/sessions/*/messages',job_route)
+        page.route('**/api/sessions/*/jobs/*',job_route)
         page.route('**/api/clusters/*/dashboard-metrics?*',metrics)
         page.route('**/api/clusters/*/metrics-detail?*',metrics)
         page.goto(args.base_url)
@@ -118,6 +125,11 @@ def main():
         assert page.locator('.evidence-journal').count()==3
         assert page.locator('.analysis-table').count()==3
         page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
+        page.get_by_role('button',name='Закрыть анализ',exact=True).click()
+        expect(page.locator('#ai-conversation')).to_be_empty()
+        page.locator('.problem-table-body .ai-spark').first.click()
+        expect(page.locator('#ai-conversation .chat-turn')).to_have_count(0)
+        assert not jobs
         page.get_by_role('button',name='Закрыть анализ',exact=True).click()
         page.locator('.problem-pager').get_by_role('button',name='→',exact=True).click()
         expect(page.locator('.problem-pager')).to_contain_text('26–50')

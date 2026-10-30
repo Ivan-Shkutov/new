@@ -13,6 +13,9 @@ def extract(name, data):
     try:
         if ext in ('.md', '.txt', '.rst'):
             text = data.decode('utf-8-sig')
+        elif ext == '.html':
+            from .import_knowledge import Page
+            page=Page();page.feed(data.decode('utf-8-sig'));text=page.body()
         elif ext == '.pdf':
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(data))
@@ -36,7 +39,7 @@ def extract(name, data):
             doc = Document(io.BytesIO(data))
             text = '\n'.join([p.text for p in doc.paragraphs] + [cell.text for t in doc.tables for r in t.rows for cell in r.cells])
         else:
-            raise HTTPException(415, 'Поддерживаются UTF-8 MD/TXT/RST, PDF с текстом и DOCX')
+            raise HTTPException(415, 'Поддерживаются UTF-8 MD/TXT/RST/HTML, PDF с текстом и DOCX')
     except HTTPException:
         raise
     except Exception:
