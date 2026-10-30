@@ -180,7 +180,7 @@ def create_app(runtime=None, polling=True):
 
     def public_cluster(row):
         cfg = row['config']
-        return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}}
+        return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}, 'astra_ai':{'enabled':bool(cfg.get('astra_ai',{}).get('enabled')),'url':cfg.get('astra_ai',{}).get('url',''),'model':cfg.get('astra_ai',{}).get('model',''),'has_key':bool(cfg.get('astra_ai',{}).get('api_key'))}}
 
     from . import dashboard, health
     metric_cache = {}
@@ -302,6 +302,7 @@ def create_app(runtime=None, polling=True):
         metrics: dict = Field(default_factory=dict)
         astra: dict = Field(default_factory=dict)
         holmes: dict = Field(default_factory=dict)
+        astra_ai: dict = Field(default_factory=dict)
 
     def checked_kube(text):
         try:
@@ -402,13 +403,38 @@ def create_app(runtime=None, polling=True):
                     items.append({'transport':'kubernetes','namespace':m.get('namespace'),'service':name,'port':port['port']})
         return {'items':items,'note':'Выберите источник именно этого кластера. Kubernetes service proxy требует отдельного разрешения GET services/proxy.', 'observed_at':snapshot(cid).get('observed_at'),'error':entry.get('error')}
 
+    def validate_engines(cfg):
+        if cfg.get('astra_ai',{}).get('enabled') and cfg.get('holmes',{}).get('enabled'):
+            raise HTTPException(422,'Выберите один движок: Astra AI или Holmes')
+        source=cfg.get('astra_ai',{})
+        if source.get('enabled') and (not source.get('url') or not source.get('model') or not source.get('api_key')):
+            raise HTTPException(422,'Для Astra AI нужны полный URL, model и Bearer token')
+
+    def selected_engine(cfg,llm):
+        if cfg.get('astra_ai',{}).get('enabled'):return cfg['astra_ai']
+        if cfg.get('holmes',{}).get('enabled'):return cfg['holmes']
+        return llm
+
+    @api.post('/clusters/{cid}/astra-ai-test')
+    def probe_astra_ai(cid: str):
+        from .astra_ai import chat
+        settings=cluster(cid)['config'].get('astra_ai',{})
+        if not settings.get('url') or not settings.get('api_key'):
+            raise HTTPException(409,'Сначала сохраните URL и Bearer token Astra AI')
+        try:
+            answer=chat(settings,[{'role':'system','content':'Проверка соединения. Никаких инструментов и действий с инфраструктурой.'},{'role':'user','content':'Кратко подтверди, что анализатор отвечает.'}])
+            return {'ok':True,'answer':answer,'stream_completed':True}
+        except connectors.ConnectorError as e:
+            raise HTTPException(502,str(e))
+
     @api.post('/clusters', status_code=201)
     def add_cluster(body: ClusterInput):
         if db().cluster(body.id):
             raise HTTPException(409, 'ID уже существует')
         if len(db().rows('SELECT id FROM clusters')) >= 20:
             raise HTTPException(409, 'Лимит этого выпуска: 20 подключений')
-        cfg = {'generation': uuid.uuid4().hex, 'kube': checked_kube(body.kubeconfig), 'metrics': validate_source(body.metrics), 'astra': validate_source(body.astra), 'holmes': validate_source(body.holmes)}
+        cfg = {'generation': uuid.uuid4().hex, 'kube': checked_kube(body.kubeconfig), 'metrics': validate_source(body.metrics), 'astra': validate_source(body.astra), 'holmes': validate_source(body.holmes),'astra_ai':validate_source(body.astra_ai)}
+        validate_engines(cfg)
         db().execute('INSERT INTO clusters VALUES (?,?,?,?)', (body.id, body.name, body.enabled, db().encrypt(cfg)))
         return public_cluster(cluster(body.id))
 
@@ -419,6 +445,7 @@ def create_app(runtime=None, polling=True):
         metrics: Optional[dict] = None
         astra: Optional[dict] = None
         holmes: Optional[dict] = None
+        astra_ai: Optional[dict] = None
 
     @api.put('/clusters/{cid}')
     def update_cluster(cid: str, body: ClusterUpdate):
@@ -427,10 +454,11 @@ def create_app(runtime=None, polling=True):
         if body.kubeconfig:
             cfg['kube'] = checked_kube(body.kubeconfig)
             cfg['generation'] = uuid.uuid4().hex
-        for field in ('metrics','astra','holmes'):
+        for field in ('metrics','astra','holmes','astra_ai'):
             val = getattr(body, field)
             if val is not None:
                 cfg[field] = merge_source(cfg.get(field, {}), val)
+        validate_engines(cfg)
         db().execute('UPDATE clusters SET name=?,enabled=?,config=? WHERE id=?', (body.name or item['name'], item['enabled'] if body.enabled is None else body.enabled, db().encrypt(cfg), cid))
         if body.kubeconfig:
             db().execute('DELETE FROM snapshots WHERE cluster_id=?', (cid,))
@@ -628,7 +656,14 @@ def create_app(runtime=None, polling=True):
                 if size>24000:break
                 history=pair+history;parent=previous.get('previous_id')
             messages[1:1]=history
-            if cfg.get('holmes',{}).get('enabled'):
+            if cfg.get('astra_ai',{}).get('enabled'):
+                from .astra_ai import chat as astra_chat
+                trace.append({'tool':'engine','status':'Astra AI / SSE'})
+                db().execute('UPDATE investigations SET trace=? WHERE id=?',(json.dumps(trace,ensure_ascii=False),jid))
+                def partial(text):
+                    db().execute('UPDATE investigations SET answer=? WHERE id=?',(text,jid))
+                answer=astra_chat(cfg['astra_ai'],messages,partial)
+            elif cfg.get('holmes',{}).get('enabled'):
                 answer,tool_trace=connectors.holmes_chat(cfg['holmes'],messages)
                 trace.extend(tool_trace);trace.append({'tool':'engine','status':'HolmesGPT'})
             else:
@@ -642,6 +677,9 @@ def create_app(runtime=None, polling=True):
             db().execute("UPDATE investigations SET status='done',answer=? WHERE id=?", (answer,jid))
         except Exception as exc:
             error=str(exc) if isinstance(exc,connectors.ConnectorError) else 'Не удалось завершить анализ. Проверьте модель, лимиты и источники.'
+            from .astra_ai import IncompleteAnswer
+            if isinstance(exc,IncompleteAnswer):
+                db().execute('UPDATE investigations SET answer=? WHERE id=?',(exc.partial,jid))
             partial_trace=locals().get('trace',[])+[{'tool':'analysis','status':'failed'}]
             db().execute("UPDATE investigations SET status='failed',error=?,trace=? WHERE id=?", (error,json.dumps(connectors.redact_structure(partial_trace),ensure_ascii=False),jid))
         finally:
@@ -670,7 +708,7 @@ def create_app(runtime=None, polling=True):
         if body.namespace and body.pod and not resolved_context:
             resolved_context={'kind':'pods','namespace':body.namespace,'name':body.pod,'cluster_id':body.cluster_id}
         llm = db().settings().get('llm', {})
-        engine=item['config'].get('holmes',{}) if item['config'].get('holmes',{}).get('enabled') else llm
+        engine=selected_engine(item['config'],llm)
         if not engine.get('url') or not engine.get('model'):
             raise HTTPException(409, 'Сначала настройте выбранный движок анализа')
         if not slots.acquire(blocking=False):

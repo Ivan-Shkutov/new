@@ -1,6 +1,6 @@
-# Pulse Clusters 0.10.0: установка с нуля
+# Pulse Clusters 0.11.0: установка с нуля
 
-Для действующей установки 0.8.0 или 0.9.0 используйте [обновление с сохранением данных](UPDATE-0.10.0-RU.md). Отдельное подключение HolmesGPT описано в [HOLMES-RU](HOLMES-RU.md).
+Для действующей установки 0.8.0–0.10.0 используйте [обновление с сохранением данных](UPDATE-0.11.0-RU.md). Отдельное подключение HolmesGPT описано в [HOLMES-RU](HOLMES-RU.md).
 
 Это самостоятельная реализация проекта. Архив 0.5.0 и его исходники не были предоставлены. Старые документы в `docs/imported` сохранены для контекста; их команды импорта 0.4/0.5, Holmes, AURA, PostgreSQL и Qdrant к этому выпуску не относятся. Для Holmes используйте только новую инструкцию выше. Не запускайте две версии на одном runtime.
 
@@ -136,14 +136,14 @@ Backup останавливает только контейнер текущег
 ```bash
 ./pulse init
 ./pulse build
-./pulse export-image /data/pulse-clusters-0.10.0.tar
+./pulse export-image /data/pulse-clusters-0.11.0.tar
 ```
 
 Перенесите checkout, образ и его `.sha256` в закрытый контур. Не переносите рабочий runtime, если это новая установка.
 
 ```bash
-sha256sum -c pulse-clusters-0.10.0.tar.sha256
-docker load --input pulse-clusters-0.10.0.tar
+sha256sum -c pulse-clusters-0.11.0.tar.sha256
+docker load --input pulse-clusters-0.11.0.tar
 cd pulse-clusters
 ./pulse init --port 8090
 ./pulse start-offline
@@ -168,13 +168,13 @@ python3 -m venv .venv
 
 ## 9. Установка из приложенного архива
 
-Скачайте `pulse-clusters-0.10.0-complete.tar.gz` и соседний `.sha256` из `releases` репозитория. На Linux в каталоге загрузок:
+Скачайте `pulse-clusters-0.11.0-complete.tar.gz` и соседний `.sha256` из `releases` репозитория. На Linux в каталоге загрузок:
 
 ```bash
-sha256sum -c pulse-clusters-0.10.0-complete.tar.gz.sha256
+sha256sum -c pulse-clusters-0.11.0-complete.tar.gz.sha256
 mkdir -p ~/apps
-tar -xzf pulse-clusters-0.10.0-complete.tar.gz -C ~/apps
-cd ~/apps/pulse-clusters-0.10.0
+tar -xzf pulse-clusters-0.11.0-complete.tar.gz -C ~/apps
+cd ~/apps/pulse-clusters-0.11.0
 ./pulse init --port 8090
 ./pulse start
 ./pulse check
