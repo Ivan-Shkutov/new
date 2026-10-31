@@ -1,0 +1,59 @@
+name: Проблема Pulse
+description: Конкретный дефект или неверный диагноз, который нужно проверить и исправить
+title: "[Pulse] "
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Раздел
+      options:
+        - Обзор и здоровье кластера
+        - Метрики CPU/RAM/дисков
+        - Kubernetes и логи
+        - Astra Monitoring
+        - ИИ и расследование
+        - База знаний
+        - Установка и обновление
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Фактическая версия Pulse
+      description: Значение /healthz или ./pulse check; исходная версия GitHub может отличаться от установленной.
+      placeholder: "0.14.1, build_id ..."
+    validations:
+      required: true
+  - type: input
+    id: object
+    attributes:
+      label: Кластер и объект
+      description: Если применимо — namespace, имя и UID Pod/ресурса.
+      placeholder: "peoplehub / am-agent / pod / UID"
+  - type: textarea
+    id: actual
+    attributes:
+      label: Что происходит
+      description: Коротко опишите наблюдаемый результат, время и частоту. Не вставляйте токены или kubeconfig.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что должно происходить
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Доказательства
+      description: Команда или API, ответ, важные строки логов, время и источник. Удалите секреты.
+      render: text
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Как проверить исправление
+      description: Один конкретный сценарий или команда и ожидаемый результат.
+    validations:
+      required: true
