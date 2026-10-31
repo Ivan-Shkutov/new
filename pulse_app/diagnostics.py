@@ -18,7 +18,21 @@ def utc():
 def small(value, limit=9000):
     value=c.redact_structure(c._sanitize(value))
     text=json.dumps(value,ensure_ascii=False)
-    return value if len(text)<=limit else {'excerpt':text[:limit], 'truncated':True}
+    if len(text)<=limit:return value
+    # Escaping the excerpt adds bytes/characters; include the wrapper in the budget.
+    excerpt={'excerpt':'','truncated':True}
+    low,high=0,len(text)
+    while low<high:
+        middle=(low+high+1)//2;excerpt['excerpt']=text[:middle]
+        if len(json.dumps(excerpt,ensure_ascii=False))<=limit:low=middle
+        else:high=middle-1
+    excerpt['excerpt']=text[:low]
+    return excerpt
+
+
+def is_partial(value):
+    return isinstance(value,dict) and bool(value.get('truncated') or value.get('continue') or
+        (value.get('metadata') or {}).get('continue'))
 
 
 def pod_facts(pod):
@@ -44,7 +58,10 @@ class Collector:
             if time.monotonic()>=self.deadline or len(self.report['records'])>=55:
                 raise c.ConnectorError('Бюджет сбора исчерпан; проверка не выполнена')
             row['attempted']=True
-            result=call();row.update(status='ok',data=small(project(result)))
+            result=call();data=small(project(result))
+            partial=is_partial(result) or is_partial(data)
+            row.update(status='partial' if partial else 'ok',complete=not partial,data=data)
+            if partial:row['notice']='Данные ограничены страницей или обрезаны; отсутствие других фактов не доказано'
         except Exception as exc:
             result=None;row.update(status='unavailable',error=str(exc) if isinstance(exc,c.ConnectorError) else 'Источник не вернул поддерживаемые данные')
         row['finished_at']=utc();self.report['records'].append(row);self.save()
@@ -112,18 +129,20 @@ class Collector:
             if label_selector:params['labelSelector']=label_selector
             # Include old/new ReplicaSets of the same Deployment when examining replacements.
             dep=next((o for o in owners if o['kind']=='Deployment'),None)
+            owner_scope_partial=not owner_uids
             if dep:
                 sets,_=self.get(client,'ReplicaSets этого Deployment',f'/apis/apps/v1/namespaces/{ns}/replicasets',f'kubectl -n {ns} get replicasets -o json',params)
+                owner_scope_partial=not sets or is_partial(sets)
                 for rs in (sets or {}).get('items',[]):
                     if any(r.get('uid')==dep['uid'] for r in rs.get('metadata',{}).get('ownerReferences',[])):
                         owner_uids.add(rs.get('metadata',{}).get('uid'))
-            rows=[];partial=False
+            rows=[];partial=owner_scope_partial
             for _ in range(4):
                 if not owner_uids:break
                 siblings,_=self.get(client,'Текущие Pod владельца',prefix+'/pods',f'kubectl -n {ns} get pods -o json',params,project=lambda result:{'items':[pod_facts(p) for p in result.get('items',[]) if any(r.get('uid') in owner_uids for r in p.get('metadata',{}).get('ownerReferences',[]))],'continue':bool(result.get('metadata',{}).get('continue'))})
-                if not siblings:break
+                if not siblings:partial=True;break
                 rows.extend(p for p in siblings.get('items',[]) if any(r.get('uid') in owner_uids for r in p.get('metadata',{}).get('ownerReferences',[])))
-                cursor=siblings.get('metadata',{}).get('continue');partial=bool(cursor)
+                cursor=siblings.get('metadata',{}).get('continue');partial=owner_scope_partial or bool(cursor)
                 if not cursor:break
                 params={**params,'continue':cursor}
             self.report['replacements']={'items':[{'name':p.get('metadata',{}).get('name'),'uid':p.get('metadata',{}).get('uid'),'phase':p.get('status',{}).get('phase'),'conditions':p.get('status',{}).get('conditions',[])} for p in rows[:50]],'truncated':partial or len(rows)>50}
@@ -146,7 +165,7 @@ class Collector:
             for previous in ([False,True] if container.get('restartCount',0) else [False]):
                 command=f'kubectl -n {ns} logs {name} -c {cn} --tail=500 --timestamps'+(' --previous' if previous else '')
                 self.run('Логи контейнера '+cn+(' (previous)' if previous else ''),command,'GET',prefix+f'/pods/{name}/log',
-                         lambda cn=cn,previous=previous:c.resource_logs(self.config['kube'],ns,name,cn,previous,expected_uid=uid),project=lambda value:value[-5000:])
+                         lambda cn=cn,previous=previous:c.resource_logs(self.config['kube'],ns,name,cn,previous,expected_uid=uid),project=lambda value:{'text':value[-5000:],'truncated':len(value)>5000,'scope':'Последние 500 строк; не полная история контейнера'})
         finished=[s.get('state',{}).get('terminated',{}).get('finishedAt') or s.get('lastState',{}).get('terminated',{}).get('finishedAt') for s in containers]
         candidate=max((v for v in finished if v),default=None)
         basis='последние 6 часов; время аварии неизвестно'
@@ -161,7 +180,7 @@ class Collector:
         self.report['history_window']={'from':start.isoformat(),'to':end.isoformat(),'basis':basis}
         astra=self.config.get('astra',{})
         if astra.get('url'):
-            self.run('Astra: логи выбранного Pod','Astra logs search (cluster/namespace/pod)','POST','/api/v1/logs/search/monitorLogs',lambda:c.astra_logs(astra,ns,name,start.isoformat(),end.isoformat()),project=lambda d:{**d,'items':d.get('items',[])[:30],'identity_note':'Scope: cluster/namespace/pod + time. UID строк Astra не подтверждён: не приписывай логи переиспользованного имени старому объекту.'})
+            self.run('Astra: логи выбранного Pod','Astra logs search (cluster/namespace/pod)','POST','/api/v1/logs/search/monitorLogs',lambda:c.astra_logs(astra,ns,name,start.isoformat(),end.isoformat()),project=lambda d:{**d,'items':d.get('items',[])[:30],'truncated':bool(d.get('truncated')) or len(d.get('items',[]))>30,'identity_note':'Scope: cluster/namespace/pod + time. UID строк Astra не подтверждён: не приписывай логи переиспользованного имени старому объекту.'})
         else:self.run('Astra: логи выбранного Pod','','CONFIG','astra',lambda:(_ for _ in ()).throw(c.ConnectorError('Astra не настроена; её логи не проверены')))
         source=c.metrics_config(self.config)
         if c.metrics_configured(source):
@@ -190,13 +209,18 @@ class Collector:
                 params={'query':expr,'start':start.timestamp(),'end':end.timestamp(),'step':max(30,int((end-start).total_seconds()/60))}
                 def read(params=params):
                     data=c._request(client,'GET',base+'/api/v1/query_range',params=params,deadline=self.deadline)
-                    if data.get('status')!='success':raise c.ConnectorError('Ошибка API метрик')
+                    for row in c._metric_series(data,'matrix'):
+                        if not isinstance(row.get('values'),list):raise c.ConnectorError('Источник вернул некорректную историю метрик')
+                        for value in row['values']:
+                            c._metric_point(value,earliest=params['start']-params['step'],latest=params['end']+params['step'])
                     return data
                 self.run('История '+key,'PromQL: '+expr,'GET','/api/v1/query_range',read,query=params)
 
     def finish(self):
         self.report['finished_at']=utc()
-        self.report['unavailable']=sum(r['status']!='ok' for r in self.report['records'])
+        self.report['unavailable']=sum(r['status'] not in ('ok','partial') for r in self.report['records'])
+        self.report['partial']=sum(r['status']=='partial' for r in self.report['records'])
+        self.report['complete']=not (self.report['unavailable'] or self.report['partial'])
         self.save()
 
 
@@ -210,7 +234,7 @@ def verified_summary(report):
     if cause:
         lines.append('Причина завершения по status.message: превышен лимит EmptyDir `'+cause['volume']+'` — `'+cause['limit']+'`. Это ограничение временного тома Pod; заполнение корневого диска узла этим не доказано.')
     for finding in report.get('findings',[]):lines.append('- ['+finding['source']+'] '+finding['fact'])
-    lines.append(f"Проверок: {len(report.get('records',[]))}; недоступны: {report.get('unavailable',0)}. Полный журнал — в доказательствах расследования.")
+    lines.append(f"Проверок: {len(report.get('records',[]))}; недоступны: {report.get('unavailable',0)}; неполные данные: {report.get('partial',0)}. Журнал — в доказательствах расследования.")
     return c.redact_sensitive_text('\n'.join(lines))
 
 
@@ -234,11 +258,22 @@ def review_answer(report,answer):
     return warnings
 
 
-def model_evidence(report):
+def model_evidence(report, limit=65000):
     """Keep every check/status and the target facts within a model context budget."""
-    output={k:v for k,v in report.items() if k!='records'}
+    if not isinstance(limit,int) or limit<2048:raise ValueError('Evidence context limit must be at least 2048 characters')
+    output={k:small(v,5000) for k,v in report.items() if k!='records'}
     count=max(1,len(report.get('records',[])))
-    output['records']=[{**{k:v for k,v in row.items() if k!='data'},
+    output['records']=[{**{k:small(v,800) for k,v in row.items() if k!='data'},
                         **({'data':small(row['data'],min(5000,45000//count))} if 'data' in row else {})}
                        for row in report.get('records',[])]
+    # Requests, query labels and top-level findings also consume context. Reduce
+    # their largest fields first without removing any evidence ID/status.
+    while len(json.dumps(output,ensure_ascii=False))>limit:
+        output['context_truncated']=True
+        candidates=[(len(json.dumps(v,ensure_ascii=False)),output,k) for k,v in output.items() if k!='records']
+        candidates.extend((len(json.dumps(v,ensure_ascii=False)),row,k) for row in output['records']
+                          for k,v in row.items() if k not in ('id','check','status'))
+        size,parent,key=max(candidates,key=lambda item:item[0])
+        if size<=100:raise c.ConnectorError('Журнал проверок не помещается в бюджет контекста')
+        parent[key]=small(parent[key],max(100,size//2))
     return output

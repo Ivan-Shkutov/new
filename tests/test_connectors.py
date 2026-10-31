@@ -143,6 +143,24 @@ def test_metrics_require_scope_and_reject_promql(monkeypatch):
     assert result["empty"]
 
 
+@pytest.mark.parametrize('case',['invalid_data','invalid_result','invalid_labels','invalid_point','nan','stale','warnings'])
+def test_query_metrics_rejects_invalid_or_partial_evidence(monkeypatch,case):
+    import time
+    row={'metric':{'instance':'node:9100'},'value':[time.time(),'25']}
+    payload={'status':'success','data':{'resultType':'vector','result':[row]}}
+    if case=='invalid_data':payload['data']=[]
+    elif case=='invalid_result':payload['data']['result']={}
+    elif case=='invalid_labels':row['metric']={'instance':12}
+    elif case=='invalid_point':row['value']=[]
+    elif case=='nan':row['value'][1]='NaN'
+    elif case=='stale':row['value'][0]-=3600
+    elif case=='warnings':payload['warnings']=['private upstream details']
+    install_transport(monkeypatch,lambda request:httpx.Response(200,json=payload))
+    with pytest.raises(c.ConnectorError) as caught:
+        c.query_metrics({'url':'https://metrics.test','mode':'dedicated'},'node_memory_total')
+    assert 'private upstream' not in str(caught.value)
+
+
 def test_upstream_redirect_does_not_forward_credentials(monkeypatch):
     seen = []
     def handler(request):
@@ -184,7 +202,7 @@ def test_llm_uses_fixed_endpoint_and_never_enables_tools(monkeypatch):
         assert "tools" not in payload
         assert payload["max_tokens"] == 6000
         assert payload["stream"] is False
-        return httpx.Response(200, json={"choices": [{"message": {"content": "Observed: pod is pending."}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Observed: pod is pending."}, "finish_reason": "stop"}]})
     install_transport(monkeypatch, handler)
     assert c.llm_chat({"url": "http://127.0.0.1:8002/v1", "model": "qwen"}, [{"role": "user", "content": "why"}]).startswith("Observed")
 

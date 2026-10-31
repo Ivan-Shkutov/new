@@ -55,6 +55,7 @@ def test_query_scope_ratios_history_and_nonfinite(monkeypatch):
     assert len(seen)==9
     assert all('cluster="one"' in params['query'] for url,params in seen)
     assert all(row['percent']==42.25 and len(row['history'])==1 for row in result['metrics'].values())
+    assert all(row['history_error'] for row in result['metrics'].values())
     assert any('mountpoint="/"' in params['query'] for url,params in seen)
     assert any('and on(instance)' in params['query'] for url,params in seen)
 
@@ -69,3 +70,56 @@ def test_history_empty_is_unknown_not_zero(monkeypatch):
     monkeypatch.setattr(connectors,'_request',lambda client,method,url,params:{'status':'success','data':{'resultType':'matrix' if url.endswith('query_range') else 'vector','result':[]}})
     result=connectors.dashboard_metrics({'url':'https://metrics.test','mode':'dedicated'})
     assert all(row['percent'] is None and row['history']==[] for row in result['metrics'].values())
+
+
+@pytest.mark.parametrize('payload',[
+    [], None, {'status':'success','data':[]},
+    {'status':'success','data':{'resultType':'vector','result':{}}},
+    {'status':'success','data':{'resultType':'vector','result':[None]}},
+    {'status':'success','data':{'resultType':'vector','result':[{'value':[]}]}},
+])
+def test_malformed_metrics_are_source_errors_not_dashboard_crashes(monkeypatch,payload):
+    monkeypatch.setattr(connectors,'_request',lambda *args,**kwargs:payload)
+    result=connectors.dashboard_metrics({'url':'https://metrics.test','mode':'dedicated'})
+    assert all(row['percent'] is None and row['error'] and row['history_error'] and row['nodes_error'] for row in result['metrics'].values())
+
+
+def test_instant_freshness_does_not_expand_with_history_window(monkeypatch):
+    timestamp=time.time()-1800
+    def request(client,method,url,params):
+        history=url.endswith('query_range')
+        row={'metric':{'instance':'node:9100'},'values' if history else 'value':[[timestamp,'25']] if history else [timestamp,'25']}
+        return {'status':'success','data':{'resultType':'matrix' if history else 'vector','result':[row]}}
+    monkeypatch.setattr(connectors,'_request',request)
+    result=connectors.dashboard_metrics({'url':'https://metrics.test','mode':'dedicated'},'24h')
+    for row in result['metrics'].values():
+        assert row['percent'] is None and row['error']
+        assert row['nodes']==[] and row['nodes_error']
+        assert row['history']==[[timestamp,25]] and not row['history_error']
+
+
+@pytest.mark.parametrize('number',['NaN','+Inf','-1','101',True])
+def test_invalid_percentages_have_explicit_errors(monkeypatch,number):
+    def request(client,method,url,params):
+        history=url.endswith('query_range');point=[time.time(),number]
+        row={'metric':{'instance':'node:9100'},'values' if history else 'value':[point] if history else point}
+        return {'status':'success','data':{'resultType':'matrix' if history else 'vector','result':[row]}}
+    monkeypatch.setattr(connectors,'_request',request)
+    result=connectors.dashboard_metrics({'url':'https://metrics.test','mode':'dedicated'})
+    assert all(row['percent'] is None and row['error'] and row['history_error'] and row['nodes_error'] for row in result['metrics'].values())
+
+
+def test_source_warnings_and_node_limit_are_not_silent(monkeypatch):
+    settings={'url':'https://metrics.test','mode':'dedicated'}
+    node_queries=set(connectors.utilization_expressions(settings,True).values())
+    def request(client,method,url,params):
+        if params['query'] in node_queries:
+            return {'status':'success','data':{'resultType':'vector','result':[{'metric':{'instance':f'node-{i}'},'value':[time.time(),'20']} for i in range(501)]}}
+        history=url.endswith('query_range')
+        return {'status':'success','warnings':['private source details'],'data':{'resultType':'matrix' if history else 'vector','result':[]}}
+    monkeypatch.setattr(connectors,'_request',request)
+    result=connectors.dashboard_metrics(settings)
+    for row in result['metrics'].values():
+        assert 'warnings' in row['error'] and 'warnings' in row['history_error']
+        assert 'private' not in row['error']
+        assert row['nodes']==[] and '500' in row['nodes_error']

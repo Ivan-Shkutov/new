@@ -13,6 +13,11 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements.txt
       - run: python -m pip install pytest==8.3.5
       - run: python -m pytest -q
+      - run: node --check pulse_app/static/app.js
+      - name: Evaluate dashboard PromQL with pinned Prometheus
+        run: |
+          docker pull prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
+          python scripts/promql-smoke.py --docker-image prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
       - run: docker compose config --quiet
       - run: docker compose -f deploy/compose.knowledge.yaml config --quiet
       - run: PULSE_RUNTIME_HOST=/tmp/pulse-ci docker compose -f deploy/compose.https.yaml config --quiet

@@ -50,10 +50,13 @@ class Knowledge:
         try:
             with httpx.Client(timeout=httpx.Timeout(120,connect=5),trust_env=False,follow_redirects=False) as client:
                 r = client.request(method,url+path,json=body,headers=headers)
-                if r.status_code==404 and not embedding:return None
+                if r.status_code==404 and not embedding and (method=='GET' or path.endswith('/points/query')):return None
                 r.raise_for_status()
                 if len(r.content)>8_000_000:raise ValueError('large response')
-                return r.json()
+                data=r.json()
+                if not isinstance(data,dict):raise ValueError('response must be an object')
+                if not embedding and data.get('status','ok')!='ok':raise ValueError('Qdrant error response')
+                return data
         except (httpx.HTTPError,ValueError,OSError):
             raise ConnectorError('Embeddings недоступны или вернули некорректный ответ' if embedding else 'Qdrant недоступен или вернул некорректный ответ') from None
 
@@ -71,7 +74,8 @@ class Knowledge:
             try:data=sorted(result.get('data',[]),key=lambda r:r['index'])
             except (TypeError,AttributeError,KeyError):raise ConnectorError('Неподдерживаемый ответ embeddings') from None
             if [r['index'] for r in data]!=list(range(len(texts))):raise ConnectorError('Неверные индексы embeddings')
-            vectors=[r['embedding'] for r in data]
+            try:vectors=[r['embedding'] for r in data]
+            except (TypeError,KeyError):raise ConnectorError('Неподдерживаемый ответ embeddings') from None
         else:raise ConnectorError('Неизвестный провайдер embeddings')
         if not isinstance(vectors,list) or len(vectors)!=len(texts) or any(not isinstance(v,list) or len(v)!=self.dimension or any(not isinstance(n,(int,float)) or not math.isfinite(n) for n in v) or not any(v) for v in vectors):
             raise ConnectorError('Размерность или значения embeddings не соответствуют настройке')
@@ -139,8 +143,11 @@ class Knowledge:
         result=self.request('POST','/collections/'+self.collection+'/points/query',{'query':vector,'limit':30,'with_payload':True,'filter':filter})
         if result is None:return [],'Коллекция отсутствует: загрузите или переиндексируйте документы'
         hits=[];seen=set()
-        for row in result.get('result',{}).get('points',[]):
-            p=row.get('payload',{});did=p.get('doc_id')
+        points=result.get('result',{}).get('points') if isinstance(result,dict) and isinstance(result.get('result'),dict) else None
+        if not isinstance(points,list):raise ConnectorError('Некорректный ответ поиска Qdrant')
+        for row in points:
+            if not isinstance(row,dict) or not isinstance(row.get('payload'),dict):raise ConnectorError('Некорректный документ в ответе Qdrant')
+            p=row['payload'];did=p.get('doc_id')
             if p.get('cluster_id') not in ('',cid):continue
             if exclude_saas and p.get('product')=='vk-workspace-saas':continue
             if kubernetes_version and p.get('product')=='kubernetes' and p.get('version')!=kubernetes_version:continue

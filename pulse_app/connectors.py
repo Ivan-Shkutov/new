@@ -376,9 +376,45 @@ def query_metrics(settings: dict, query: str) -> dict:
     expr = METRIC_EXPRESSIONS[query].replace("{scope}", "{" + ",".join(selectors) + "}")
     with metric_client(settings) as (client, base):
         data = _request(client, "GET", base + "/api/v1/query", params={"query": expr})
-    if not isinstance(data, dict) or data.get("status") != "success" or not isinstance(data.get("data"), dict):
-        raise ConnectorError("Metrics API returned an error or invalid response")
-    return {"metric": query, "data": data["data"], "empty": not bool(data["data"].get("result")), "query": expr}
+    series = _metric_series(data, 'vector')
+    now = time.time()
+    for row in series:
+        _metric_point(row.get('value'), earliest=now-120, latest=now+30)
+    return {"metric": query, "data": data["data"], "empty": not bool(series), "query": expr}
+
+
+def _metric_series(reply, expected):
+    """Validate the Prometheus envelope before any caller treats it as evidence."""
+    if not isinstance(reply, dict) or reply.get('status') != 'success':
+        raise ConnectorError('Invalid metrics API response')
+    data = reply.get('data')
+    if not isinstance(data, dict) or data.get('resultType') != expected or not isinstance(data.get('result'), list):
+        raise ConnectorError('Invalid metrics API response')
+    # Prometheus may return success alongside warnings about partial data.
+    # Do not echo upstream annotations, which can contain private endpoints.
+    if reply.get('warnings'):
+        raise ConnectorError('Metrics API returned warnings; completeness is not confirmed')
+    for row in data['result']:
+        if not isinstance(row, dict) or not isinstance(row.get('metric', {}), dict):
+            raise ConnectorError('Invalid metrics API series')
+        if any(not isinstance(k, str) or not isinstance(v, str) for k, v in row.get('metric', {}).items()):
+            raise ConnectorError('Invalid metrics API labels')
+    return data['result']
+
+
+def _metric_point(value, *, earliest, latest, percentage=False):
+    import math
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or any(isinstance(v, bool) for v in value):
+        raise ConnectorError('Источник вернул некорректную метрику')
+    try:
+        timestamp, number = float(value[0]), float(value[1])
+    except (ValueError, TypeError, OverflowError):
+        raise ConnectorError('Источник вернул некорректную метрику') from None
+    if not math.isfinite(timestamp) or not math.isfinite(number) or number < 0 or (percentage and number > 100):
+        raise ConnectorError('Источник вернул некорректную метрику')
+    if not earliest <= timestamp <= latest:
+        raise ConnectorError('Время метрики вне допустимого интервала; актуальность не подтверждена')
+    return [timestamp, round(number, 2) if percentage else number]
 
 
 def _field(row, path):
@@ -416,6 +452,7 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
             raise ConnectorError("Astra start must be an ISO timestamp with timezone") from None
     else:
         start = (now - timedelta(hours=1)).isoformat()
+    if end is None:end = now.isoformat()
     if end is not None:
         try:
             end_time = datetime.fromisoformat(end.replace('Z','+00:00'))
@@ -423,8 +460,6 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
                 raise ValueError()
         except (ValueError, AttributeError):
             raise ConnectorError('Astra end must follow start and include timezone') from None
-    else:
-        end = now.isoformat()
     expected = [cluster, namespace, pod]
     rows, scanned, truncated = [], 0, False
     with _client(settings) as client:
@@ -444,7 +479,7 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
             if len(source) < 250:
                 break
             truncated = page == MAX_PAGES - 1
-    return {"items": [_redact_log_row(row) for row in rows[:1000]], "scanned": scanned, "truncated": truncated,
+    return {"items": [_redact_log_row(row) for row in rows[:1000]], "scanned": scanned, "truncated": truncated or len(rows)>1000,
             "notice": "Astra adapter contract must be validated for your server version"}
 
 
@@ -479,10 +514,10 @@ def llm_chat(settings: dict, messages: list) -> str:
         raise ConnectorError("LLM returned no text; tools and autonomous actions are not enabled")
     if message.get('tool_calls') or message.get('function_call'):
         raise ConnectorError('Local LLM requested tools; native mode never executes model commands')
-    if choice.get('finish_reason') not in (None,'stop'):
+    if choice.get('finish_reason')!='stop':
         from .astra_ai import IncompleteAnswer
-        raise IncompleteAnswer('Локальная модель не завершила ответ: '+str(choice['finish_reason'])[:40],result)
-    return result
+        raise IncompleteAnswer('Локальная модель не подтвердила завершение ответа: '+str(choice.get('finish_reason'))[:40],result)
+    return redact_sensitive_text(result)
 
 
 # Ratios are computed by the source across series, never by averaging node percentages.
@@ -502,13 +537,18 @@ def utilization_expressions(settings, per_node=False):
         selectors.append(f'{name}={json.dumps(value)}')
     def scope(*extra):
         return '{' + ','.join(selectors + list(extra)) + '}'
-    cpu = 'max by(instance,cpu,mode)(rate(node_cpu_seconds_total' + scope('mode!~"guest.*"') + '[5m]))'
-    idle = 'max by(instance,cpu,mode)(rate(node_cpu_seconds_total' + scope('mode="idle"') + '[5m]))'
-    mem_total = 'max by(instance)(node_memory_MemTotal_bytes' + scope() + ')'
-    mem_avail = 'max by(instance)(node_memory_MemAvailable_bytes' + scope() + ')'
+    def fresh(selector, rate=False):
+        # PromQL timestamps of arithmetic results are evaluation times. Gate
+        # raw samples before aggregation, including when rate uses a 5m range.
+        values = f'rate({selector}[5m])' if rate else selector
+        return f'({values} and (timestamp({selector}) >= time() - 120))'
+    cpu = 'max by(instance,cpu,mode)(' + fresh('node_cpu_seconds_total'+scope('mode!~"guest.*"'),True) + ')'
+    idle = 'max by(instance,cpu,mode)(' + fresh('node_cpu_seconds_total'+scope('mode="idle"'),True) + ')'
+    mem_total = 'max by(instance)(' + fresh('node_memory_MemTotal_bytes'+scope()) + ')'
+    mem_avail = 'max by(instance)(' + fresh('node_memory_MemAvailable_bytes'+scope()) + ')'
     fs = scope('mountpoint="/"', 'fstype!~"tmpfs|overlay|squashfs|ramfs"')
-    disk_total = 'max by(instance)(node_filesystem_size_bytes' + fs + ')'
-    disk_avail = 'max by(instance)(node_filesystem_avail_bytes' + fs + ')'
+    disk_total = 'max by(instance)(' + fresh('node_filesystem_size_bytes'+fs) + ')'
+    disk_avail = 'max by(instance)(' + fresh('node_filesystem_avail_bytes'+fs) + ')'
     if per_node:
         return {'cpu':f'100 * (1 - sum by(instance)({idle}) / sum by(instance)({cpu}))',
                 'ram':f'100 * (1 - ({mem_avail} and on(instance) {mem_total}) / ({mem_total} and on(instance) {mem_avail}))',
@@ -522,7 +562,6 @@ def utilization_expressions(settings, per_node=False):
 
 def dashboard_metrics(settings, window='1h'):
     """Three cluster ratios and bounded history; source timestamps are preserved."""
-    import math
     from concurrent.futures import ThreadPoolExecutor
     windows = {'1h':3600, '6h':21600, '24h':86400}
     if window not in windows:
@@ -541,37 +580,49 @@ def dashboard_metrics(settings, window='1h'):
                     params.update(start=start, end=end, step=step)
                 try:
                     reply = _request(client,'GET',endpoint+('query_range' if history else 'query'),params=params)
-                    data = reply.get('data', {})
-                    expected = 'matrix' if history else 'vector'
-                    if reply.get('status') != 'success' or data.get('resultType') != expected:
-                        raise ConnectorError('Invalid metrics API response')
-                    series = data.get('result', [])
+                    series = _metric_series(reply, 'matrix' if history else 'vector')
                     if len(series) > 1:
                         raise ConnectorError('Expected one cluster aggregate')
-                    values = series[0].get('values', []) if history and series else [series[0]['value']] if series else []
+                    if not series:
+                        raise ConnectorError('Пустая выборка: проверьте node_exporter, scrape и labels')
+                    values = series[0].get('values') if history else [series[0].get('value')]
+                    if not isinstance(values, list) or not values:
+                        raise ConnectorError('Источник вернул некорректную метрику')
+                    if history and len(values) > 122:
+                        raise ConnectorError('История превышает лимит 122 точек; полнота не подтверждена')
                     points = []
-                    for ts, value in values:
-                        n, timestamp = float(value), float(ts)
-                        if math.isfinite(n) and math.isfinite(timestamp) and 0 <= n <= 100 and start-step <= timestamp <= end+step:
-                            points.append([timestamp, round(n, 2)])
+                    for value in values:
+                        try:
+                            points.append(_metric_point(value, earliest=start-step if history else end-120,
+                                                        latest=end+30, percentage=True))
+                        except ConnectorError as exc:
+                            if not history:
+                                raise
+                            base_result['history_error'] = str(exc)
                     if history:
-                        base_result['history'] = points[:122]
+                        base_result['history'] = points
                     elif points:
                         base_result['observed_at'], base_result['percent'] = points[-1]
-                    if not series:
-                        base_result['history_error' if history else 'error'] = 'Пустая выборка: проверьте node_exporter, scrape и labels'
-                except (ConnectorError, ValueError, TypeError, KeyError) as exc:
-                    base_result['history_error' if history else 'error'] = str(exc) if isinstance(exc, ConnectorError) else 'Источник вернул некорректную метрику'
+                except ConnectorError as exc:
+                    base_result['history_error' if history else 'error'] = str(exc)
             try:
                 reply=_request(client,'GET',endpoint+'query',params={'query':node_expressions[metric]})
-                data=reply.get('data',{})
-                if reply.get('status')!='success' or data.get('resultType')!='vector':raise ConnectorError('Invalid node metrics response')
-                for row in data.get('result',[])[:500]:
-                    ts,value=row['value'];n=float(value);timestamp=float(ts);instance=row.get('metric',{}).get('instance')
-                    if isinstance(instance,str) and math.isfinite(n) and 0<=n<=100 and math.isfinite(timestamp) and start-step<=timestamp<=end+step:
-                        base_result['nodes'].append({'instance':instance,'percent':round(n,2),'observed_at':timestamp})
-                if not base_result['nodes']:base_result['nodes_error']='Нет детализации по узлам'
-            except (ConnectorError,ValueError,TypeError,KeyError):base_result['nodes_error']='Не удалось получить детализацию по узлам'
+                series = _metric_series(reply, 'vector')
+                if len(series) > 500:
+                    raise ConnectorError('Детализация превышает лимит 500 узлов; полнота не подтверждена')
+                nodes, instances = [], set()
+                for row in series:
+                    timestamp, number = _metric_point(row.get('value'), earliest=end-120, latest=end+30, percentage=True)
+                    instance = row.get('metric', {}).get('instance')
+                    if not isinstance(instance, str) or not instance or instance in instances:
+                        raise ConnectorError('Некорректная или повторная идентичность узла метрик')
+                    instances.add(instance)
+                    nodes.append({'instance':instance,'percent':number,'observed_at':timestamp})
+                if not nodes:
+                    raise ConnectorError('Нет детализации по узлам')
+                base_result['nodes'] = nodes
+            except ConnectorError as exc:
+                base_result['nodes_error'] = str(exc)
         return metric, base_result
     with ThreadPoolExecutor(max_workers=3) as executor:
         results = dict(executor.map(read, ('cpu','ram','disk')))
@@ -584,10 +635,11 @@ def holmes_chat(settings, messages):
     ask = messages[-1]['content']
     with _client(settings, timeout=httpx.Timeout(180,connect=10)) as client:
         info=_request(client,'GET',_url(settings.get('url'))+'/api/info',params={'detail':'full'})
-        if not isinstance(info,dict) or not isinstance(info.get('toolsets'),list) or not info.get('auth_enabled'):
+        if not isinstance(info,dict) or not isinstance(info.get('toolsets'),list) or info.get('auth_enabled') is not True or any(not isinstance(t,dict) or not isinstance(t.get('name'),str) for t in info['toolsets']):
             raise ConnectorError('Holmes не подтвердил защищённый контракт /api/info?detail=full')
-        active={t.get('name') for t in info['toolsets'] if t.get('enabled') and t.get('status')=='enabled'}
-        if 'pulse-readonly' not in active or active-{'pulse-readonly','skills'}:
+        active={t.get('name') for t in info['toolsets'] if t.get('enabled') or t.get('status')=='enabled'}
+        ready=any(t.get('name')=='pulse-readonly' and t.get('enabled') is True and t.get('status')=='enabled' for t in info['toolsets'])
+        if not ready or active-{'pulse-readonly','skills'}:
             raise ConnectorError('Holmes tools не прошли проверку: разрешены только pulse-readonly и skills')
         data = _request(client,'POST',_url(settings.get('url'))+'/api/chat',json={
             'ask':ask,'model':settings.get('model') or None,'stream':False,
@@ -596,9 +648,14 @@ def holmes_chat(settings, messages):
             'enable_tool_approval':False})
     if not isinstance(data,dict) or not isinstance(data.get('analysis'),str) or not data['analysis'].strip():
         raise ConnectorError('HolmesGPT вернул неподдерживаемый ответ /api/chat')
+    if data.get('error') or data.get('status') in ('error','failed','cancelled','incomplete') or data.get('finish_reason') not in (None,'stop'):
+        from .astra_ai import IncompleteAnswer
+        raise IncompleteAnswer('HolmesGPT сообщил об ошибке или незавершённом ответе',data['analysis'])
     if data.get('pending_approvals'):
         raise ConnectorError('Holmes запросил неподдерживаемое действие. Проверьте разрешённые read-only tools.')
     calls=data.get('tool_calls') or []
+    if not isinstance(calls,list) or any(not isinstance(call,dict) for call in calls):
+        raise ConnectorError('HolmesGPT вернул неподдерживаемый журнал tools')
     # Store names/status only, not raw tool arguments, bodies, headers or credentials.
     trace=[{'tool':str(c.get('tool_name') or c.get('name') or 'Holmes tool')[:120],
             'status':str(c.get('status') or 'reported')[:40]} for c in calls[:30] if isinstance(c,dict)]

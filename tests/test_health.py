@@ -87,6 +87,19 @@ def test_completed_pods_and_cumulative_restarts_are_not_critical():
     assert h['pods']['restarts']==74
 
 
+@pytest.mark.parametrize('seconds,severity',[(10,'warning'),(600,'critical')])
+def test_terminating_pod_is_visible_and_cannot_make_health_green(seconds,severity):
+    s=snapshot();terminating=pod()
+    terminating['metadata']['deletionTimestamp']=stamp(seconds)
+    s['resources']['pods']['items']=[terminating]
+    result=summarize(s,'one','One');h=result['health']
+    assert h['status']==h['pods']['health']==result['workloads']['pods']['health']==severity
+    assert h['pods']['active']==h['pods']['terminating']==h['pods']['total']==1
+    assert h['pods']['healthy']==h['pods']['ready']==result['workloads']['pods']['positive']==0
+    assert result['workloads']['pods']['states']=={'terminating':1}
+    assert h['issues'][0]['severity']==severity
+
+
 def test_running_jobs_and_suspended_cron_are_normal_not_75_percent_error():
     s=snapshot();s['resources']['jobs']['items']=[{'status':{'active':1}}]
     s['resources']['cronjobs']['items']=[{'spec':{'suspend':True}}]

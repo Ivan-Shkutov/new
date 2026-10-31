@@ -1,4 +1,5 @@
 import json
+import time
 from copy import deepcopy
 from urllib.parse import parse_qs
 import httpx
@@ -117,7 +118,7 @@ def test_kubernetes_metrics_proxy_preserves_cluster_scope_and_credential(monkeyp
         assert request.headers['authorization']=='Bearer kube-test'
         assert request.url.path=='/api/v1/namespaces/monitoring/services/http:kube-prom-kube-prometheus-prometheus:9090/proxy/api/v1/query'
         assert 'cluster="one"' in request.url.params['query']
-        return httpx.Response(200,json={'status':'success','data':{'resultType':'vector','result':[{'value':[1,'100']}]}})
+        return httpx.Response(200,json={'status':'success','data':{'resultType':'vector','result':[{'value':[time.time(),'100']}]}})
     install_transport(monkeypatch,handler)
     cfg={'kube':{'server':'https://cluster.test','token':'kube-test'},'metrics':{'transport':'kubernetes','namespace':'monitoring','service':'kube-prom-kube-prometheus-prometheus','port':9090,'labels':{'cluster':'one'},'token':'wrong-direct-token'}}
     assert not c.query_metrics(c.metrics_config(cfg),'node_memory_total')['empty']

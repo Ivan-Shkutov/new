@@ -30,6 +30,66 @@ def candidates(services):
     return items
 
 
+def coverage_checks(data, nodes):
+    """Use Kubernetes identities, not exporter row counts, to prove coverage."""
+    aliases={};expected=set()
+    def alias(value, name):
+        if isinstance(value, str) and value:
+            aliases.setdefault(value.casefold(), set()).add(name)
+    for item in nodes['items']:
+        meta=item.get('metadata',{});name=meta.get('name')
+        if not name:continue
+        expected.add(name);alias(name,name);alias(name.split('.')[0],name)
+        for a in item.get('status',{}).get('addresses',[]):
+            if a.get('type') in ('InternalIP','Hostname'):alias(a.get('address'),name)
+    checks={};now=time.time()
+    def fresh(value):
+        percent, timestamp = value.get('percent'), value.get('observed_at')
+        return (isinstance(percent,(int,float)) and not isinstance(percent,bool) and math.isfinite(percent) and 0<=percent<=100
+                and isinstance(timestamp,(int,float)) and not isinstance(timestamp,bool) and now-120<=timestamp<=now+30)
+    for key in ('cpu','ram','disk'):
+        value=data.get('metrics',{}).get(key,{})
+        seen=set();foreign=[];duplicates=[];invalid=False
+        for row in value.get('nodes',[]):
+            if not fresh(row):
+                invalid=True
+                continue
+            instance=str(row.get('instance','')).casefold()
+            try:host=urlsplit('http://'+instance).hostname
+            except ValueError:host=None
+            matches=aliases.get(instance) or aliases.get(host or '') or set()
+            if len(matches)==1:
+                match=next(iter(matches))
+                if match in seen:duplicates.append(instance)
+                seen.add(match)
+            else:foreign.append(instance)
+        complete=nodes['complete'] and bool(expected) and seen==expected and not foreign and not duplicates and not invalid
+        error=value.get('error') or value.get('nodes_error') or (None if fresh(value) else 'Актуальное значение не получено')
+        if not error and not complete:
+            error=('Полный список узлов не получен' if not nodes['complete'] or not expected else
+                   'Источник содержит неизвестные или неоднозначные узлы' if foreign else
+                   'Несколько источников метрик соответствуют одному узлу' if duplicates else
+                   'Не все узлы представлены актуальными метриками')
+        checks[key]={'ok':fresh(value) and complete and not error,'percent':value.get('percent'),'observed_at':value.get('observed_at'),
+                     'covered':len(seen),'expected':len(expected),'foreign':foreign[:10],'duplicates':duplicates[:10],'missing':sorted(expected-seen)[:20],'error':error,
+                     'history_points':len(value.get('history',[])),'history_error':value.get('history_error')}
+    return checks
+
+
+def apply_coverage(data, nodes):
+    """Recheck current coverage before showing an aggregate as this cluster's usage."""
+    checks=coverage_checks(data,nodes)
+    metrics={}
+    for key,check in checks.items():
+        value={**data.get('metrics',{}).get(key,{}),'coverage':check}
+        if not check['ok']:
+            value.update(percent=None,observed_at=None,history=[],nodes=[],error=check['error'],
+                         history_error=check['error'],nodes_error=check['error'])
+        metrics[key]=value
+    return {**data,'metrics':metrics,'expected_nodes':len(nodes['items']) if nodes['complete'] else None,
+            'status':'ok' if all(v['ok'] for v in checks.values()) else 'partial'}
+
+
 def probe(config, source=None):
     proposed=dict(source if source is not None else config.get('metrics',{}))
     if not c.metrics_configured(proposed):
@@ -39,31 +99,7 @@ def probe(config, source=None):
     except c.ConnectorError as exc:
         return {'ok':False,'status':'error','configured':True,'source':public_source(proposed),'metrics':{},'error':str(exc),'action':failure_action(str(exc),proposed.get('transport'))}
     nodes=live_list(config['kube'],'nodes')
-    aliases={};expected=set()
-    for item in nodes['items']:
-        meta=item.get('metadata',{});name=meta.get('name')
-        if not name:continue
-        expected.add(name);aliases[name.casefold()]=name;aliases[name.split('.')[0].casefold()]=name
-        for a in item.get('status',{}).get('addresses',[]):
-            if a.get('type') in ('InternalIP','Hostname') and a.get('address'):aliases[a['address'].casefold()]=name
-    checks={};now=time.time()
-    for key in ('cpu','ram','disk'):
-        value=data.get('metrics',{}).get(key,{})
-        seen=set();foreign=[]
-        for row in value.get('nodes',[]):
-            if not isinstance(row.get('percent'),(int,float)) or not math.isfinite(row['percent']) or not 0<=row['percent']<=100 or not isinstance(row.get('observed_at'),(int,float)) or not now-120<=row.get('observed_at',0)<=now+30:continue
-            instance=str(row.get('instance','')).casefold()
-            try:host=urlsplit('http://'+instance).hostname
-            except ValueError:host=None
-            match=aliases.get(instance) or aliases.get(host or '')
-            if match:seen.add(match)
-            else:foreign.append(instance)
-        fresh=isinstance(value.get('percent'),(int,float)) and math.isfinite(value['percent']) and 0<=value['percent']<=100 and isinstance(value.get('observed_at'),(int,float)) and now-120<=value['observed_at']<=now+30
-        complete=nodes['complete'] and bool(expected) and seen==expected and not foreign
-        error=value.get('error') or value.get('nodes_error') or (None if fresh else 'Актуальное значение не получено')
-        checks[key]={'ok':fresh and complete and not error,'percent':value.get('percent'),'observed_at':value.get('observed_at'),
-                     'covered':len(seen),'expected':len(expected),'foreign':foreign[:10],'missing':sorted(expected-seen)[:20],'error':error,
-                     'history_points':len(value.get('history',[])),'history_error':value.get('history_error')}
+    checks=coverage_checks(data,nodes)
     ok=all(v['ok'] for v in checks.values())
     errors='; '.join(str(v['error']) for v in checks.values() if v['error'])
     action='CPU, RAM и корневая ФС получены для всех узлов.' if ok else failure_action(errors,proposed.get('transport'))

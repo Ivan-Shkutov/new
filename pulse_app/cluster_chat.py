@@ -121,7 +121,11 @@ def inventory_answer(report):
 
 def compact_snapshot(snapshot, namespace=None, limit=30000):
     """Summarize before serializing. Never cut serialized JSON in the middle."""
+    if not isinstance(limit,int) or limit<512:raise ValueError('Context limit must be at least 512 characters')
+    from .diagnostics import small
     resources=snapshot.get('resources',{});out={'observed_at':snapshot.get('observed_at'),'complete':snapshot.get('complete',False),'errors':snapshot.get('errors',[]),'cluster_info':snapshot.get('cluster_info',{}),'resources':{}}
+    # Server metadata and extension resource names are not intrinsically bounded.
+    for field in ('observed_at','errors','cluster_info'):out[field]=small(out[field],1500)
     pods=resources.get('pods',{});rows=[pod_row(p) for p in pods.get('items',[]) if not namespace or p.get('metadata',{}).get('namespace')==namespace]
     rows.sort(key=lambda p:(p['healthy'],p['phase']=='Running',p['namespace'],p['name']))
     out['resources']['pods']={'count':len(rows),'phases':dict(Counter(p['phase'] for p in rows)),
@@ -135,8 +139,30 @@ def compact_snapshot(snapshot, namespace=None, limit=30000):
         if kind in ('pods','nodes'):continue
         items=[x for x in entry.get('items',[]) if not namespace or x.get('metadata',{}).get('namespace') in (None,namespace)]
         out['resources'][kind]={'count':len(items),'error':entry.get('error'),'truncated':entry.get('truncated',False)}
-    while len(json.dumps(out,ensure_ascii=False))>limit and out['resources']['pods']['items']:
+    for row in out['resources']['nodes']['items']:
+        for field in ('capacity','allocatable','conditions'):row[field]=small(row[field],800)
+    while len(json.dumps(out['resources']['nodes'],ensure_ascii=False))>limit//3 and out['resources']['nodes']['items']:
+        out['resources']['nodes']['items'].pop();out['resources']['nodes']['truncated']=True
+    def oversized():return len(json.dumps(out,ensure_ascii=False))>limit
+    while oversized() and out['resources']['pods']['items']:
         out['resources']['pods']['items'].pop();out['resources']['pods']['truncated']=True
-    if len(json.dumps(out,ensure_ascii=False))>limit:
-        out['resources']['nodes']['items']=out['resources']['nodes']['items'][:6];out['resources']['nodes']['truncated']=True
+    while oversized() and out['resources']['nodes']['items']:
+        out['resources']['nodes']['items'].pop();out['resources']['nodes']['truncated']=True
+    if oversized():
+        out['context_truncated']=True
+        # Keep Pod counts even when metadata alone exceeds the budget.
+        for field in ('errors','cluster_info','observed_at'):
+            if oversized():out[field]=small(out[field],100)
+        for kind in list(out['resources']):
+            if kind not in ('pods','nodes') and oversized():del out['resources'][kind]
+        for kind in ('pods','nodes'):
+            for field in ('error','phases'):
+                if field in out['resources'][kind] and oversized():
+                    out['resources'][kind][field]=small(out['resources'][kind][field],100)
+    if oversized():
+        # Very small requested budgets still produce valid, explicitly partial JSON.
+        pod_summary=out['resources']['pods']
+        out={'complete':False,'context_truncated':True,'resources':{'pods':{
+            k:pod_summary[k] for k in ('count','healthy','unhealthy','items')}}}
+        out['resources']['pods']['truncated']=True
     return out

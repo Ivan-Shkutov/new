@@ -10,7 +10,7 @@ class Model(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def do_POST(self):
   body=json.loads(self.rfile.read(int(self.headers['Content-Length'])));requests.append(body)
-  payload=json.dumps({'choices':[{'message':{'content':'Тестовый ответ. История только в текущем диалоге.'}}]},ensure_ascii=False).encode()
+  payload=json.dumps({'choices':[{'message':{'content':'Тестовый ответ. История только в текущем диалоге.'},'finish_reason':'stop'}]},ensure_ascii=False).encode()
   self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(payload)
 server=ThreadingHTTPServer(('127.0.0.1',0),Model);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 with sync_playwright() as p:

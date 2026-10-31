@@ -242,8 +242,9 @@ def create_app(runtime=None, polling=True):
                 return cached[1]
         try:
             result = {'configured':True, **connectors.dashboard_metrics(cfg,window)}
-            entry=snapshot(cid).get('resources',{}).get('nodes',{})
-            result['expected_nodes']=len(entry.get('items',[])) if entry and not entry.get('error') and not entry.get('truncated') else None
+            from .cluster_chat import live_list
+            from .metric_setup import apply_coverage
+            result=apply_coverage(result,live_list(item['config']['kube'],'nodes'))
         except connectors.ConnectorError as e:
             result = {'configured':True,'metrics':{},'error':str(e)}
         with metric_cache_lock:
@@ -494,6 +495,7 @@ def create_app(runtime=None, polling=True):
     def update_cluster(cid: str, body: ClusterUpdate):
         item = cluster(cid)
         cfg = item['config']
+        original=json.dumps(cfg,sort_keys=True)
         if body.kubeconfig:
             cfg['kube'] = checked_kube(body.kubeconfig)
             cfg['generation'] = uuid.uuid4().hex
@@ -502,9 +504,14 @@ def create_app(runtime=None, polling=True):
             if val is not None:
                 cfg[field] = merge_source(cfg.get(field, {}), val)
         validate_engines(cfg)
-        db().execute('UPDATE clusters SET name=?,enabled=?,config=? WHERE id=?', (body.name or item['name'], item['enabled'] if body.enabled is None else body.enabled, db().encrypt(cfg), cid))
-        if body.kubeconfig:
-            db().execute('DELETE FROM snapshots WHERE cluster_id=?', (cid,))
+        with db().connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current=connection.execute('SELECT config,name,enabled FROM clusters WHERE id=?',(cid,)).fetchone()
+            if not current or json.dumps(db().decrypt(current['config']),sort_keys=True)!=original or current['name']!=item['name'] or current['enabled']!=item['enabled']:
+                raise HTTPException(409,'Подключение изменилось. Обновите настройки перед сохранением.')
+            connection.execute('UPDATE clusters SET name=?,enabled=?,config=? WHERE id=?',(body.name or item['name'],item['enabled'] if body.enabled is None else body.enabled,db().encrypt(cfg),cid))
+            if body.kubeconfig:connection.execute('DELETE FROM snapshots WHERE cluster_id=?',(cid,))
+        with metric_cache_lock:metric_cache.clear()
         return public_cluster(cluster(cid))
 
     @api.delete('/clusters/{cid}')
@@ -721,8 +728,7 @@ def create_app(runtime=None, polling=True):
                 update(evidence=json.dumps(report,ensure_ascii=False),trace=json.dumps([{'tool':'Kubernetes live inventory','status':intent},{'tool':'engine','status':'Точная таблица API; генерация моделью не используется'}],ensure_ascii=False),answer=inventory_answer(report),status='done' if report['complete'] else 'failed',error=report.get('error') or '')
                 return
             from .runbooks import SYSTEM_PROMPT,select_runbooks,MODE_PROMPTS
-            selected_skills=select_runbooks(resolved_context,body.question)
-            trace=[{'tool':'skill:'+r['id'],'status':'selected','version':r['version']} for r in selected_skills]
+            trace=[]
             if body.cluster_id and cluster(body.cluster_id)['config'].get('generation')!=cfg.get('generation'):
                 raise connectors.ConnectorError('Подключение изменилось. Запустите анализ заново.')
             snap = snapshot(body.cluster_id) if body.cluster_id else {'resources':{},'complete':False}
@@ -751,6 +757,8 @@ def create_app(runtime=None, polling=True):
                 context=json.dumps(connectors.redact_structure(model_evidence(live_report)),ensure_ascii=False)
             else:
                 context=evidence
+            selected_skills=select_runbooks({'context':resolved_context,'pod':live_report.get('pod',{}),'findings':live_report.get('findings',[])},body.question)
+            trace.extend({'tool':'skill:'+r['id'],'status':'selected','version':r['version']} for r in selected_skills)
             docs = connectors.redact_structure(search_docs(body.question, body.cluster_id))
             trace.append({'tool':'Documents FTS','status':'matches '+str(len(docs))})
             retrieval_query=body.question+' '+str(resolved_context.get('reason',''))+' '+str(resolved_context.get('detail',''))[:1200]

@@ -80,7 +80,7 @@ def upstream(tmp_path):
                 if self.headers.get('Authorization') != 'Bearer fixture-model-token':
                     return self.respond({'error': 'unauthorized'}, 401)
                 observations['llm'].append(payload)
-                return self.respond({'choices': [{'message': {'content': 'Гипотеза: readiness не проходит. Источник: логи web. Проверьте /ready.'}}]})
+                return self.respond({'choices': [{'message': {'content': 'Гипотеза: readiness не проходит. Источник: логи web. Проверьте /ready.'}, 'finish_reason': 'stop'}]})
             if self.path == '/astra/api/v1/logs/search/monitorLogs':
                 return self.respond({'data': {'items': [
                     {'labels.cluster': 'one', 'labels.k8s.namespace.name': 'default', 'labels.k8s.pod.name': 'web', 'message': 'our log'},

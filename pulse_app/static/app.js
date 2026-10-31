@@ -196,11 +196,13 @@ function renderDashboardMetrics(target,result,interactive=true) {
   for(const [key,title,hint] of [['cpu','CPU','Non-idle CPU узлов'],['ram','RAM','Total − available'],['disk','Диски /','Корневая файловая система узлов; не PVC']]) {
     const value=result.metrics?.[key],card=node('article','panel utilization-card');card.dataset.testid=`utilization-${key}`;
     const stale=value?.observed_at && Date.now()/1000-value.observed_at>120;const nodeRows=(value?.nodes||[]).filter(n=>Number.isFinite(n.percent)&&Date.now()/1000-n.observed_at<=120);const worst=nodeRows.reduce((a,b)=>!a||b.percent>a.percent?b:a,null),severityValue=Math.max(value?.percent||0,worst?.percent||0);const coverageMissing=Number.isFinite(result.expected_nodes)&&nodeRows.length!==result.expected_nodes;
-    card.append(append(node('div','utilization-head'),append(node('div'),node('h3','',title),node('small','muted',hint)),donut(value?.percent,title,stale?'amber':value?.percent>=90?'danger':value?.percent>=75?'amber':'')));
-    card.classList.add(!Number.isFinite(value?.percent)||stale?'metric-unknown':severityValue>=90?'metric-critical':severityValue>=75||coverageMissing?'metric-warning':'metric-healthy');
+    const sourceError=!!(value?.error||value?.nodes_error||result.error);
+    card.append(append(node('div','utilization-head'),append(node('div'),node('h3','',title),node('small','muted',hint)),donut(value?.percent,title,stale||sourceError?'amber':value?.percent>=90?'danger':value?.percent>=75?'amber':'')));
+    card.classList.add(!Number.isFinite(value?.percent)||stale||sourceError?'metric-unknown':severityValue>=90?'metric-critical':severityValue>=75||coverageMissing?'metric-warning':'metric-healthy');
     if(Number.isFinite(value?.percent)&&!stale&&value.percent>=75)card.append(node('p',value.percent>=90?'critical-text':'warning-text',value.percent>=90?'Высокая утилизация — проверьте запас ресурсов':'Утилизация выше 75% — следите за запасом'));
     if(!Number.isFinite(value?.percent)){const reason=value?.error||result.error||result.note||'Нет данных';const text=node('p','muted metric-status',reason);text.title=reason;card.append(text);}
     if(value?.error)notice(card,value.error,'warning');
+    if(value?.nodes_error)notice(card,value.nodes_error,'warning');
     if(stale)notice(card,'Значение метрики устарело','warning');
     if(value?.observed_at)card.append(node('small','metadata',`Источник: ${date(value.observed_at*1000)}`));
     const peak=node('div','metric-peak');peak.append(node('span',worst?.percent>=90?'critical-text':worst?.percent>=75?'warning-text':'',worst?`Пик ${Math.round(worst.percent)}% · ${shortNode(worst.instance)}`:'По узлам —'));if(coverageMissing)peak.append(node('span','warning-text',` ${nodeRows.length}/${result.expected_nodes} источников`));peak.title=worst?`${worst.instance}: ${worst.percent}% · ${date(worst.observed_at*1000)}`:value?.nodes_error||'Детализация по узлам не получена';card.append(peak);

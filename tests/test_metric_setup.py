@@ -76,7 +76,30 @@ def test_changed_connection_during_probe_is_not_overwritten(client,monkeypatch):
 
 
 def test_build_is_visible_and_identifies_running_code(client):
+    from pulse_app import __version__
     from pulse_app.build import identity
     public=client.get('/healthz').json();private=client.get('/api/version').json()
     assert public['build_id']==private['build_id']==identity()['build_id'] and len(public['build_id'])==16
-    assert public['version']=='0.14.0'
+    assert public['version']==__version__
+
+
+@pytest.mark.parametrize('case',['complete','missing','foreign','duplicate','ambiguous','incomplete','stale'])
+def test_dashboard_coverage_checks_identities_not_only_counts(case):
+    now=time.time()
+    nodes={'items':[{'metadata':{'name':name}} for name in ('node-a','node-b')],'complete':True,'error':None}
+    rows=[{'instance':name+':9100','percent':25,'observed_at':now} for name in ('node-a','node-b')]
+    if case=='missing':rows.pop()
+    elif case=='foreign':rows[-1]['instance']='foreign:9100'
+    elif case=='duplicate':rows.append({**rows[0],'instance':'node-a:9200'})
+    elif case=='ambiguous':
+        nodes['items']=[{'metadata':{'name':'node-a.example'}},{'metadata':{'name':'node-a.other'}}]
+        rows=[{**rows[0]},{**rows[0],'instance':'node-a:9200'}]
+    elif case=='incomplete':nodes['complete']=False
+    elif case=='stale':rows[-1]['observed_at']-=1800
+    data={'metrics':{k:{'percent':25,'observed_at':now,'history':[[now,25]],'nodes':rows,'error':None,'nodes_error':None} for k in ('cpu','ram','disk')}}
+    result=setup.apply_coverage(data,nodes)
+    for value in result['metrics'].values():
+        assert value['coverage']['ok']==(case=='complete')
+        if case=='complete':assert value['percent']==25 and value['history'] and value['nodes']
+        else:assert value['percent'] is None and value['error'] and value['history']==[] and value['nodes']==[]
+    assert data['metrics']['cpu']['percent']==25  # validation does not corrupt cached raw observations

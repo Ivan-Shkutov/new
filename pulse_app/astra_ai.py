@@ -21,14 +21,16 @@ def chat(settings, messages, progress=None):
     key=settings.get('api_key','')
     if not isinstance(key,str):raise c.ConnectorError('Неверный формат токена Astra AI')
     key=re.sub(r'^Bearer\s+','',key.strip(),flags=re.I)
+    if not key:raise c.ConnectorError('Нужен отдельный Bearer token Astra AI')
     if any(ch.isspace() for ch in key):raise c.ConnectorError('В поле Astra AI нужен один Bearer token без заголовков и переносов строк')
     settings['api_key']=key
     url=c._url(settings.get('url'))
     model=c._text(settings.get('model'),'model',200)
     if not model:raise c.ConnectorError('Нужен model ID Astra AI')
+    if not isinstance(messages,list) or not messages or len(messages)>60:raise c.ConnectorError('Неверный формат контекста Astra AI')
     clean=[]
     for message in messages:
-        if message.get('role') not in ('system','user','assistant'):raise c.ConnectorError('Неподдерживаемая роль чата')
+        if not isinstance(message,dict) or message.get('role') not in ('system','user','assistant'):raise c.ConnectorError('Неподдерживаемая роль чата')
         clean.append({'role':message['role'],'content':c._text(message.get('content'),'message',100000)})
     if not clean or len(clean)>60 or sum(len(m['content']) for m in clean)>150000:
         raise c.ConnectorError('Контекст Astra AI превышает лимит')
@@ -55,6 +57,7 @@ def chat(settings, messages, progress=None):
         if not isinstance(choices,list) or len(choices)!=1 or not isinstance(choices[0],dict):
             raise c.ConnectorError('Неподдерживаемая структура choices Astra AI')
         choice=choices[0];delta=choice.get('delta',{})
+        if choice.get('index',0)!=0:raise c.ConnectorError('Неподдерживаемый индекс ответа Astra AI')
         if not isinstance(delta,dict):raise c.ConnectorError('Неподдерживаемый delta Astra AI')
         if delta.get('tool_calls') or delta.get('function_call'):
             raise c.ConnectorError('Astra AI запросила выполнение инструмента; этот адаптер не исполняет команды')
@@ -101,7 +104,7 @@ def chat(settings, messages, progress=None):
                     buffer+=decoder.decode(b'',final=True)
                     if buffer:line(buffer.rstrip('\r'))
                     if data:dispatch()
-        if not done and not finished:raise c.ConnectorError('Поток завершился без [DONE] или finish_reason=stop')
+        if not finished:raise c.ConnectorError('Поток завершился без finish_reason=stop; полнота ответа не подтверждена')
         answer=''.join(parts)
         if not answer.strip():raise c.ConnectorError('Astra AI не вернула текст ответа')
         publish(True)
