@@ -439,6 +439,7 @@ def create_app(runtime=None, polling=True):
         report=probe(original,source)
         if not report['ok']:return {'saved':False,**report}
         with db().connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
             row=connection.execute('SELECT config FROM clusters WHERE id=?',(cid,)).fetchone()
             if not row or db().decrypt(row['config'])!=original:
                 raise HTTPException(409,'Подключение изменилось во время проверки. Повторите проверку.')
@@ -980,7 +981,7 @@ def create_app(runtime=None, polling=True):
     @api.post('/clusters/{cid}/holmes-bootstrap')
     def bootstrap_holmes(cid: str, body: HolmesBootstrap, request: Request):
         from .holmes_bundle import write_bundle
-        cfg=cluster(cid)['config'];llm=db().settings().get('llm',{})
+        cfg=cluster(cid)['config'];original=json.dumps(cfg,sort_keys=True);llm=db().settings().get('llm',{})
         if not llm.get('url') or not llm.get('model'):
             raise HTTPException(409,'Сначала сохраните проверенный vLLM URL и model ID')
         if llm.get('ca_pem'):
@@ -993,10 +994,23 @@ def create_app(runtime=None, polling=True):
         if (runtime/'holmes'/cid).exists():
             raise HTTPException(409,'Конфигурация уже существует. Повторная генерация запрещена, чтобы не ротировать рабочие токены.')
         token=secrets.token_urlsafe(48);key=secrets.token_urlsafe(48)
-        root=write_bundle(runtime,cid,portal_port,body.port,body.image,llm,token,key)
-        cfg['holmes_agent_token']=token
-        cfg['holmes']={'enabled':False,'url':f'http://127.0.0.1:{body.port}','model':'pulse-local','api_key':key}
-        db().execute('UPDATE clusters SET config=? WHERE id=?',(db().encrypt(cfg),cid))
+        root=None
+        try:
+            with db().connect() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                current=connection.execute('SELECT config FROM clusters WHERE id=?',(cid,)).fetchone()
+                if not current or json.dumps(db().decrypt(current['config']),sort_keys=True)!=original:
+                    raise HTTPException(409,'Подключение изменилось. Повторите генерацию Holmes.')
+                if (runtime/'holmes'/cid).exists():raise HTTPException(409,'Конфигурация Holmes уже существует.')
+                root=write_bundle(runtime,cid,portal_port,body.port,body.image,llm,token,key)
+                cfg['holmes_agent_token']=token
+                cfg['holmes']={'enabled':False,'url':f'http://127.0.0.1:{body.port}','model':'pulse-local','api_key':key}
+                connection.execute('UPDATE clusters SET config=? WHERE id=?',(db().encrypt(cfg),cid))
+        except Exception:
+            if root is not None:
+                import shutil
+                shutil.rmtree(root)
+            raise
         # Container path differs from host path; the host-side CLI prints the real command.
         return {'ok':True,'relative_path':'holmes/'+cid,'port':body.port,'enabled':False,'note':'Запустите отдельный Holmes, проверьте ответ, затем включите режим в настройках кластера.'}
 

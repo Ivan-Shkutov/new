@@ -82,9 +82,9 @@ class Collector:
             pod_source='live'
             if pod and (pod.get('metadata',{}).get('name')!=name or not pod.get('metadata',{}).get('uid')):
                 pod=None
-                self.report['records'][-1].update(status='unavailable',error='API не вернул объект Pod с name/UID')
+                self.report['records'][-1].update(status='unavailable',complete=False,error='API не вернул объект Pod с name/UID')
             if pod and uid and pod.get('metadata',{}).get('uid')!=uid:
-                self.report['records'][-1].update(status='identity_changed',data={'name':name,'observed_uid':pod.get('metadata',{}).get('uid'),'expected_uid':uid,'excluded':True})
+                self.report['records'][-1].update(status='identity_changed',complete=False,data={'name':name,'observed_uid':pod.get('metadata',{}).get('uid'),'expected_uid':uid,'excluded':True})
                 self.report['findings'].append({'source':pid,'fact':'Имя занято другим UID. Новый Pod не используется как доказательство прежней проблемы.'})
                 pod=None
             if not pod and cached and (not uid or cached.get('metadata',{}).get('uid')==uid):

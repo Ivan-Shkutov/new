@@ -480,7 +480,11 @@ function showAnalysisJobs(jobs){
   if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));
   const review=Array.isArray(trace)?trace.find(t=>t.tool==='answer-review'):null;
   if(review?.warnings?.length)notice(turn,'Проверка ответа: '+review.warnings.join(' '),'warning');
-  if(evidence.records?.length){const missing=evidence.records.filter(r=>r.status!=='ok');if(missing.length)notice(turn,`Полнота данных: ${evidence.records.length-missing.length}/${evidence.records.length}. Недоступны: ${missing.map(r=>r.check).join('; ')}. Эти источники не подтверждают вывод.`,'warning');}
+  if(evidence.records?.length){
+    const missing=evidence.records.filter(r=>!['ok','partial'].includes(r.status)),partial=evidence.records.filter(r=>r.status==='partial');
+    if(missing.length)notice(turn,`Недоступные проверки: ${missing.map(r=>r.check).join('; ')}. Их результат не получен.`,'warning');
+    if(partial.length)notice(turn,`Неполные проверки: ${partial.map(r=>r.check).join('; ')}. Получена часть данных; отсутствие других ошибок не доказано.`,'warning');
+  }
   if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}
   if(evidence.records)showEvidence(turn,evidence);
   else if(!analysisState?.context?.chat)turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));
@@ -552,7 +556,13 @@ $('#holmes-test').addEventListener('click',event=>busy(event.currentTarget,async
 
 $('#holmes-accept').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');out.textContent='Проверяем настоящий вызов инструмента…';try{const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-accept`,{method:'POST'});out.textContent=result.ok?'Инструмент вызван, непредсказуемый результат получен. Можно включить Holmes для кластера.':result.answer;}catch(e){out.textContent=errorText(e);}}));
 
-function showEvidence(target,report){if(target.querySelector('.evidence-journal'))return;const journal=node('details','evidence-journal');journal.append(node('summary','',`Реальные проверки: ${report.records.length} · недоступны ${report.unavailable??report.records.filter(r=>r.status!=='ok').length}`),node('p','muted',report.note||'API-запросы, эквиваленты kubectl и полученные данные.'));for(const record of report.records){const row=node('details','evidence-row');row.append(node('summary','',`${record.id} · ${record.check} · ${record.status}`),node('small','muted',date(record.finished_at)),node('pre','',`${record.method} ${record.path}\n${record.query?JSON.stringify(record.query):''}\n${record.equivalent_command||''}`),node('pre','',record.error||JSON.stringify(record.data,null,2)));journal.append(row);}target.append(journal);}
+function showEvidence(target,report){
+ if(target.querySelector('.evidence-journal'))return;
+ const missing=report.records.filter(r=>!['ok','partial'].includes(r.status)).length,partial=report.records.filter(r=>r.status==='partial').length,journal=node('details','evidence-journal');
+ journal.append(node('summary','',`Реальные проверки: ${report.records.length} · недоступны ${missing} · неполные ${partial}`),node('p','muted',report.note||'API-запросы, эквиваленты kubectl и полученные данные.'));
+ for(const record of report.records){const row=node('details','evidence-row');row.append(node('summary','',`${record.id} · ${record.check} · ${record.status}`),node('small','muted',date(record.finished_at)),node('pre','',`${record.method} ${record.path}\n${record.query?JSON.stringify(record.query):''}\n${record.equivalent_command||''}`),node('pre','',record.error||JSON.stringify(record.data,null,2)));journal.append(row);}
+ target.append(journal);
+}
 let metricCandidates=[];
 $('#metrics-discover').addEventListener('click',event=>busy(event.currentTarget,async()=>{try{const data=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/metrics-discovery`);metricCandidates=data.items;const select=clear('#metrics-candidates');select.append(new Option('Выберите источник',''));metricCandidates.forEach((s,i)=>select.append(new Option(`${s.namespace}/${s.service}:${s.port}`,String(i))));$('#metrics-message').textContent=data.error||data.note+(data.items.length?'':' Сервисы пока не найдены в снимке. Выполните сбор.');}catch(e){$('#metrics-message').textContent=errorText(e);}}));
 $('#metrics-candidates').addEventListener('change',event=>{if(event.target.value==='')return;const source=metricCandidates[Number(event.target.value)],form=$('#cluster-form');form.elements.metrics_transport.value='kubernetes';for(const key of ['namespace','service','port'])form.elements['metrics_'+key].value=source[key];updateMetricsFields();$('#metrics-message').textContent='Источник выбран. Укажите scope (выделенный или labels), сохраните кластер и проверьте подключение.';});

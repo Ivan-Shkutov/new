@@ -1,6 +1,7 @@
 """Generate a per-cluster, read-only HolmesGPT bundle. Never execute it here."""
 import json
 import os
+import tempfile
 from pathlib import Path
 from .runbooks import RUNBOOKS
 
@@ -22,6 +23,16 @@ runpy.run_path("/app/server.py",run_name="__main__")
 
 def write_bundle(runtime,cid,portal_port,port,image,llm,agent_token,api_key):
     root=Path(runtime)/'holmes'/cid
+    root.parent.mkdir(parents=True,mode=0o700,exist_ok=True)
+    if root.exists():raise FileExistsError('Holmes bundle already exists')
+    with tempfile.TemporaryDirectory(prefix='.'+cid+'-',dir=root.parent) as staging:
+        pending=Path(staging)/'bundle'
+        _write_bundle(pending,cid,portal_port,port,image,llm,agent_token,api_key)
+        pending.rename(root)
+    return root
+
+
+def _write_bundle(root,cid,portal_port,port,image,llm,agent_token,api_key):
     root.mkdir(parents=True,mode=0o700,exist_ok=False)
     os.chmod(root,0o700)
     def save(name,value):

@@ -52,7 +52,7 @@ def test_failed_reindex_and_old_vectors_are_never_cited(tmp_path,monkeypatch):
     assert kb.search('Evicted','')[0]==[]
 
 
-@pytest.mark.parametrize('vectors',[[[0,0,0]],[[math.nan,1,2]],[[1,2]],None,[[1,2,'x']],['bad']])
+@pytest.mark.parametrize('vectors',[[[0,0,0]],[[math.nan,1,2]],[[1,2]],None,[[1,2,'x']],['bad'],[[True,0,0]]])
 def test_invalid_embeddings_fail_closed(tmp_path,monkeypatch,vectors):
     kb,_,_=setup(tmp_path,monkeypatch)
     monkeypatch.setattr(kb,'request',lambda *a,**kw:{'embeddings':vectors})

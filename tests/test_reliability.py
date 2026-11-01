@@ -38,6 +38,29 @@ def test_knowledge_missing_write_target_is_not_success(tmp_path,monkeypatch):
     with pytest.raises(ConnectorError):Knowledge.request(kb,'PUT','/collections/test/points?wait=true',{})
 
 
+def test_knowledge_http_failure_keeps_status_without_upstream_secrets(tmp_path,monkeypatch):
+    kb,_,_=setup(tmp_path,monkeypatch)
+    from pulse_app.knowledge import Knowledge
+    install_transport(monkeypatch,lambda request:httpx.Response(500,json={'error':'token=private-value'}))
+    with pytest.raises(ConnectorError,match='Qdrant HTTP 500') as exc:
+        Knowledge.request(kb,'PUT','/collections/test/points?wait=true',{})
+    assert 'private-value' not in str(exc.value)
+
+
+@pytest.mark.parametrize('payload',[{}, {'result':None}, {'result':[]}, {'result':{'config':None}}, {'result':{'config':{'params':{'vectors':[]}}}}])
+def test_invalid_qdrant_metadata_does_not_crash_status_or_report_ready(tmp_path,monkeypatch,payload):
+    kb,_,_=setup(tmp_path,monkeypatch)
+    monkeypatch.setattr(kb,'request',lambda *a,**kw:payload)
+    assert kb.status()['qdrant']=='unavailable'
+    with pytest.raises(ConnectorError):kb.ensure()
+
+
+def test_invalid_embedding_catalogue_is_an_explicit_source_error(tmp_path,monkeypatch):
+    kb,_,_=setup(tmp_path,monkeypatch);kb.revision='pinned'
+    monkeypatch.setattr(kb,'request',lambda *a,**kw:{'models':[None]})
+    with pytest.raises(ConnectorError):kb.embed(['query'])
+
+
 @pytest.mark.parametrize('payload',[[],{'result':None},{'result':{'points':'bad'}},{'result':{'points':[None]}}])
 def test_knowledge_invalid_search_is_not_empty_result(tmp_path,monkeypatch,payload):
     kb,_,_=setup(tmp_path,monkeypatch)

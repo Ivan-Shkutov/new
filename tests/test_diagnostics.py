@@ -178,5 +178,6 @@ def test_same_name_new_uid_is_excluded_from_old_case(monkeypatch):
     install_transport(monkeypatch,handler)
     report=d.collect_pod(config(),'am-agent','bad','old-uid')
     assert report['records'][0]['status']=='identity_changed'
+    assert not report['records'][0]['complete']
     assert report['pod']['source_type']=='unavailable'
     assert 'DO-NOT-ATTRIBUTE' not in json.dumps(report)

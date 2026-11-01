@@ -148,7 +148,10 @@ def make_backup(runtime: Path, target: Path) -> Path:
 def restore_backup(runtime: Path, source: Path) -> Path | None:
     source = source.resolve()
     checksum = Path(str(source) + '.sha256')
-    expected = checksum.read_text().split()[0]
+    fields = checksum.read_text().split()
+    if not fields:
+        raise ValueError('Backup SHA256 file is empty')
+    expected = fields[0]
     actual = file_hash(source)
     if len(expected) != 64 or not secrets.compare_digest(actual, expected):
         raise ValueError('Backup SHA256 mismatch')
@@ -181,6 +184,21 @@ def restore_backup(runtime: Path, source: Path) -> Path | None:
         for required in ('.env', 'secrets/portal-password', 'registry.key'):
             if not (candidate / required).is_file():
                 raise ValueError(f'Backup missing required file: {required}')
+        # Validate before replacing a working runtime, including failures that
+        # otherwise surfaced only while changing ownership after the rename.
+        cfg = load_env(candidate)
+        uid, gid = int(cfg.get('PULSE_UID', os.getuid())), int(cfg.get('PULSE_GID', os.getgid()))
+        port = int(cfg.get('PULSE_PORT', '8090'))
+        if not (0 <= uid < 2**32-1 and 0 <= gid < 2**32-1 and 1024 <= port <= 65535):
+            raise ValueError('Backup contains invalid UID, GID or port')
+        if len((candidate / 'secrets/portal-password').read_text().strip()) < 16:
+            raise ValueError('Backup password is invalid')
+        try:
+            key = base64.b64decode((candidate / 'registry.key').read_bytes().strip(), altchars=b'-_', validate=True)
+        except ValueError:
+            raise ValueError('Backup registry.key is invalid') from None
+        if len(key) != 32:
+            raise ValueError('Backup registry.key is invalid')
         check_databases(candidate)
         preserved = None
         if runtime.exists():
@@ -195,10 +213,10 @@ def restore_backup(runtime: Path, source: Path) -> Path | None:
                     raise
         else:
             candidate.rename(runtime)
-        cfg = load_env(runtime)
-        uid, gid = int(cfg.get('PULSE_UID', os.getuid())), int(cfg.get('PULSE_GID', os.getgid()))
         for path in [runtime, *runtime.rglob('*')]:
-            path.chmod(0o700 if path.is_dir() else 0o600)
+            # Caddy runs with cap_drop=ALL and may have another UID; its
+            # bind-mounted generated config must remain readable after restore.
+            path.chmod(0o700 if path.is_dir() else 0o644 if path == runtime / 'https/Caddyfile' else 0o600)
             if os.getuid() == 0:
                 os.chown(path, uid, gid)
         print(f'Restored to {runtime}; previous runtime: {preserved or "none"}')
@@ -211,9 +229,10 @@ def health_check(runtime: Path):
     username = settings.get('PULSE_USERNAME', 'pulse')
     password = (runtime / 'secrets/portal-password').read_text().strip()
     credentials = base64.b64encode(f'{username}:{password}'.encode()).decode()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     for endpoint in ('/healthz', '/api/overview'):
         request = urllib.request.Request(f'http://127.0.0.1:{port}{endpoint}', headers={'Authorization': 'Basic ' + credentials})
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with opener.open(request, timeout=15) as response:
             data = json.load(response)
         print(endpoint, json.dumps(data, ensure_ascii=False))
         if endpoint=='/healthz':
@@ -223,7 +242,7 @@ def health_check(runtime: Path):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Pulse Clusters 0.14.2 lifecycle')
+    parser = argparse.ArgumentParser(description='Pulse Clusters 0.14.3 lifecycle')
     parser.add_argument('--runtime', type=Path, default=Path(os.environ.get('PULSE_RUNTIME', ROOT / 'runtime')))
     sub = parser.add_subparsers(dest='command', required=True)
     init = sub.add_parser('init'); init.add_argument('--port', type=int, default=8090)
@@ -259,7 +278,7 @@ def main(argv=None):
             output.parent.mkdir(parents=True, exist_ok=True)
             if output.exists():
                 raise ValueError('Output file exists')
-            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.14.2'], check=True)
+            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.14.3'], check=True)
             Path(str(output) + '.sha256').write_text(f'{file_hash(output)}  {output.name}\n')
         elif args.command in ('backup', 'restore'):
             if args.command == 'restore' and not args.confirm_restore:

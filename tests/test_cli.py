@@ -139,5 +139,5 @@ def test_check_rejects_wrong_running_release_or_code(tmp_path,monkeypatch,runnin
     import json
     runtime=tmp_path/'runtime';cli.initialize(runtime)
     def reply(*args,**kwargs):return io.BytesIO(json.dumps({'status':'ok','version':running_version,'build_id':running_build}).encode())
-    monkeypatch.setattr(cli.urllib.request,'urlopen',reply)
+    monkeypatch.setattr(cli.urllib.request.OpenerDirector,'open',reply)
     with pytest.raises(ValueError,match='другая сборка'):cli.health_check(runtime)

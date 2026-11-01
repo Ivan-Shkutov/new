@@ -57,6 +57,9 @@ class Knowledge:
                 if not isinstance(data,dict):raise ValueError('response must be an object')
                 if not embedding and data.get('status','ok')!='ok':raise ValueError('Qdrant error response')
                 return data
+        except httpx.HTTPStatusError as exc:
+            service='Embeddings' if embedding else 'Qdrant'
+            raise ConnectorError(f'{service} HTTP {exc.response.status_code}; проверьте права и журналы источника') from None
         except (httpx.HTTPError,ValueError,OSError):
             raise ConnectorError('Embeddings недоступны или вернули некорректный ответ' if embedding else 'Qdrant недоступен или вернул некорректный ответ') from None
 
@@ -64,6 +67,8 @@ class Knowledge:
         if self.provider=='ollama':
             if self.revision:
                 tags=self.request('GET','/api/tags',embedding=True)
+                if not isinstance(tags,dict) or not isinstance(tags.get('models'),list) or any(not isinstance(row,dict) for row in tags['models']):
+                    raise ConnectorError('Неподдерживаемый каталог embedding-моделей')
                 name=self.model if ':' in self.model else self.model+':latest'
                 digest=next((row.get('digest') for row in tags.get('models',[]) if row.get('name')==name),None)
                 if digest!=self.revision:raise ConnectorError('Embedding-модель изменилась. Обновите revision и переиндексируйте базу.')
@@ -77,9 +82,18 @@ class Knowledge:
             try:vectors=[r['embedding'] for r in data]
             except (TypeError,KeyError):raise ConnectorError('Неподдерживаемый ответ embeddings') from None
         else:raise ConnectorError('Неизвестный провайдер embeddings')
-        if not isinstance(vectors,list) or len(vectors)!=len(texts) or any(not isinstance(v,list) or len(v)!=self.dimension or any(not isinstance(n,(int,float)) or not math.isfinite(n) for n in v) or not any(v) for v in vectors):
+        if not isinstance(vectors,list) or len(vectors)!=len(texts) or any(not isinstance(v,list) or len(v)!=self.dimension or any(isinstance(n,bool) or not isinstance(n,(int,float)) or not math.isfinite(n) for n in v) or not any(v) for v in vectors):
             raise ConnectorError('Размерность или значения embeddings не соответствуют настройке')
         return vectors
+
+    def collection_info(self, reply):
+        try:
+            info=reply['result'];vectors=info['config']['params']['vectors']
+            compatible=isinstance(vectors,dict) and vectors.get('size')==self.dimension and vectors.get('distance')=='Cosine'
+        except (TypeError,KeyError):
+            raise ConnectorError('Некорректные метаданные коллекции Qdrant') from None
+        if not compatible:raise ConnectorError('Несовместимая коллекция Qdrant')
+        return info
 
     def status(self):
         counts=self.store.rows("SELECT CASE WHEN fingerprint!=? THEN 'needs_reindex' ELSE status END AS status,count(*) AS count FROM knowledge_documents GROUP BY CASE WHEN fingerprint!=? THEN 'needs_reindex' ELSE status END",(self.fingerprint,self.fingerprint))
@@ -87,8 +101,8 @@ class Knowledge:
         if self.configured:
             try:
                 r=self.request('GET','/collections/'+self.collection)
-                result['qdrant']='ready' if r else 'collection_missing'
-                result['points']=(r or {}).get('result',{}).get('points_count',0)
+                result['qdrant']='ready' if r is not None else 'collection_missing'
+                result['points']=self.collection_info(r).get('points_count',0) if r is not None else 0
             except ConnectorError as e:result['qdrant']='unavailable';result['error']=str(e)
         return result
 
@@ -100,8 +114,7 @@ class Knowledge:
             for key in ('cluster_id','doc_id'):
                 self.request('PUT',path+'/index?wait=true',{'field_name':key,'field_schema':'keyword'})
         else:
-            v=data.get('result',{}).get('config',{}).get('params',{}).get('vectors',{})
-            if v.get('size')!=self.dimension or v.get('distance')!='Cosine':raise ConnectorError('Несовместимая коллекция Qdrant')
+            self.collection_info(data)
 
     def ingest(self, document):
         if not self.configured:raise ConnectorError('Настройте Qdrant и embeddings перед загрузкой')
@@ -148,6 +161,8 @@ class Knowledge:
         for row in points:
             if not isinstance(row,dict) or not isinstance(row.get('payload'),dict):raise ConnectorError('Некорректный документ в ответе Qdrant')
             p=row['payload'];did=p.get('doc_id')
+            if not isinstance(did,str) or not isinstance(p.get('revision'),str) or not isinstance(p.get('chunk'),int) or isinstance(p['chunk'],bool) or p['chunk']<0:
+                raise ConnectorError('Некорректная идентичность документа Qdrant')
             if p.get('cluster_id') not in ('',cid):continue
             if exclude_saas and p.get('product')=='vk-workspace-saas':continue
             if kubernetes_version and p.get('product')=='kubernetes' and p.get('version')!=kubernetes_version:continue

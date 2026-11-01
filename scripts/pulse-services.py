@@ -5,7 +5,9 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from importlib.machinery import SourceFileLoader
-pulse=SourceFileLoader('pulse_cli',str(ROOT/'pulse')).load_module()
+from importlib.util import module_from_spec,spec_from_loader
+loader=SourceFileLoader('pulse_cli',str(ROOT/'pulse'))
+pulse=module_from_spec(spec_from_loader(loader.name,loader));loader.exec_module(pulse)
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--runtime',type=Path,default=ROOT/'runtime')
 p.add_argument('command',choices=['knowledge-start','knowledge-model','knowledge-check','knowledge-stop','https-init','https-start','https-stop','https-ca'])
@@ -21,9 +23,11 @@ process_env=dict(os.environ,**env,PULSE_RUNTIME_HOST=str(runtime))
 def compose(*args,**kw):return subprocess.run(command+list(args),env=process_env,check=True,**kw)
 if a.command=='knowledge-start':
     additions={'PULSE_QDRANT_URL':'http://127.0.0.1:16333','PULSE_EMBEDDINGS_URL':'http://127.0.0.1:11435','PULSE_EMBEDDINGS_MODEL':'bge-m3','PULSE_EMBEDDINGS_PROVIDER':'ollama','PULSE_EMBEDDINGS_DIMENSION':'1024'}
-    with (runtime/'.env').open('a') as f:
-        for key,value in additions.items():
-            if key not in env:f.write(f'{key}={value}\n')
+    missing={key:value for key,value in additions.items() if not env.get(key)}
+    if missing:
+        lines=[line for line in (runtime/'.env').read_text().splitlines() if line.split('=',1)[0] not in missing]
+        (runtime/'.env').write_text('\n'.join(lines)+'\n'+''.join(f'{key}={value}\n' for key,value in missing.items()))
+        env.update(missing);process_env.update(missing)
     compose('up','-d')
     for url in ((env.get('PULSE_QDRANT_URL') or 'http://127.0.0.1:16333')+'/readyz',(env.get('PULSE_EMBEDDINGS_URL') or 'http://127.0.0.1:11435')+'/api/version'):
         ready=False
@@ -36,9 +40,9 @@ if a.command=='knowledge-start':
         if not ready:raise SystemExit('Service did not become ready; inspect docker compose logs before continuing.')
     print('Services started. Next: knowledge-model, knowledge-check, then ./pulse start-offline to apply environment.')
 elif a.command=='knowledge-model':
-    model=env.get('PULSE_EMBEDDINGS_MODEL','bge-m3')
+    model=env.get('PULSE_EMBEDDINGS_MODEL') or 'bge-m3'
     if not a.offline:compose('exec','-T','embeddings','ollama','pull',model)
-    with urllib.request.urlopen(env.get('PULSE_EMBEDDINGS_URL','http://127.0.0.1:11435')+'/api/tags',timeout=15) as r:tags=json.load(r)
+    with urllib.request.urlopen((env.get('PULSE_EMBEDDINGS_URL') or 'http://127.0.0.1:11435')+'/api/tags',timeout=15) as r:tags=json.load(r)
     name=model if ':' in model else model+':latest'
     digest=next((row['digest'] for row in tags['models'] if row['name']==name),None)
     if not digest:raise SystemExit('Model digest unavailable')
@@ -48,10 +52,15 @@ elif a.command=='knowledge-model':
 elif a.command=='knowledge-check':
     def get(url):
         with urllib.request.urlopen(url,timeout=10) as r:return r.read()
-    get(env.get('PULSE_QDRANT_URL','http://127.0.0.1:16333')+'/readyz')
-    tags=json.loads(get(env.get('PULSE_EMBEDDINGS_URL','http://127.0.0.1:11435')+'/api/tags'))
-    model=env.get('PULSE_EMBEDDINGS_MODEL','bge-m3')
-    assert any(r['name'].split(':')[0]==model.split(':')[0] for r in tags['models']),'Embedding model is not loaded'
+    get((env.get('PULSE_QDRANT_URL') or 'http://127.0.0.1:16333')+'/readyz')
+    tags=json.loads(get((env.get('PULSE_EMBEDDINGS_URL') or 'http://127.0.0.1:11435')+'/api/tags'))
+    model=env.get('PULSE_EMBEDDINGS_MODEL') or 'bge-m3'
+    name=model if ':' in model else model+':latest'
+    selected=next((r for r in tags.get('models',[]) if isinstance(r,dict) and r.get('name')==name),None)
+    if selected is None:
+        raise SystemExit('Configured embedding model tag is not loaded: '+name)
+    if env.get('PULSE_EMBEDDINGS_REVISION') and selected.get('digest')!=env['PULSE_EMBEDDINGS_REVISION']:
+        raise SystemExit('Embedding digest changed. Review the model, pin its revision and reindex documents.')
     print('Qdrant ready; embedding model present. First real search also checks dimensions and embedding API.')
 elif a.command.endswith('-stop'):compose('stop')
 elif a.command=='https-init':
