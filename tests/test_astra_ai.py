@@ -41,6 +41,13 @@ def test_sse_utf8_crlf_payload_reasoning_and_completion(monkeypatch):
     assert partial[-1]=='Факт: ошибка.' and all('INTERNAL' not in p for p in partial)
 
 
+def test_observed_astra_extra_fields_and_null_finish_until_stop(monkeypatch):
+    def chunk(delta,finish=None):
+        return 'data: '+json.dumps({'object':'chat.completion.chunk','model':'qwen','choices':[{'index':0,'delta':delta,'finish_reason':finish,'stop_reason':None,'logprobs':None,'token_ids':None}]},ensure_ascii=False)+'\n\n'
+    install_transport(monkeypatch,lambda request:response(chunk({'role':'assistant','content':''})+chunk({'content':'Проверка потока.'})+chunk({},'stop')+'data: [DONE]\n\n'))
+    assert astra_ai.chat(SETTINGS,MESSAGES)=='Проверка потока.'
+
+
 @pytest.mark.parametrize('mode',['eof','broken','length','error','tools','invalid'])
 def test_stream_failures_keep_partial_and_never_report_done(monkeypatch,mode):
     ending={'eof':'','broken':'','length':event(finish='length')+'data: [DONE]\n\n','error':'data: {"error":{"message":"private-body"}}\n\n',

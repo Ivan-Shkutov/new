@@ -57,7 +57,11 @@ with tempfile.TemporaryDirectory(prefix='pulse-analysis-tls-') as folder:
     page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.goto(a.base_url);page.locator('#cluster-select').select_option(cid);page.get_by_role('button',name='Анализ ИИ: bad',exact=True).click()
     page.get_by_role('button',name='Проверить ИИ',exact=True).click();expect(page.locator('#analysis-engine-result')).to_contain_text('401',timeout=15000)
     page.get_by_role('button',name='Сжатый анализ',exact=True).click();expect(page.locator('#ai-conversation')).to_contain_text('Astra AI HTTP 401',timeout=15000);expect(page.locator('.chat-answer')).to_contain_text('превышен лимит EmptyDir');expect(page.locator('#ai-conversation')).to_contain_text('Недоступные проверки:');expect(page.locator('#ai-conversation')).to_contain_text('Неполные проверки:');assert not calls['local']
+    assert page.locator('.analysis-coverage').count()==1
+    assert not page.locator('.analysis-sources').evaluate('(e)=>e.open')
+    page.locator('.analysis-sources>summary').click();expect(page.locator('.evidence-journal')).to_be_visible()
     page.get_by_role('button',name='Повторить через локальную LLM',exact=True).click();expect(page.locator('#ai-status')).to_contain_text('Ответ получен',timeout=15000);expect(page.locator('.chat-answer')).to_contain_text('Причина роста файлов не доказана');assert calls['local']==1
+    assert 'Проверенные данные Pulse' not in page.locator('.chat-answer').inner_text()
     assert page.locator('#analysis-engine').input_value()=='local'
     page.get_by_role('button',name='Проверить ИИ',exact=True).click();expect(page.locator('#analysis-engine-result')).to_contain_text('Авторизация и завершение ответа: OK',timeout=15000)
     rows=context.request.get(a.base_url+'/api/clusters').json()['items'];assert next(r for r in rows if r['id']==cid)['astra_ai']['enabled']

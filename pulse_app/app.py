@@ -790,7 +790,10 @@ def create_app(runtime=None, polling=True):
             while parent and parent not in seen and len(history)<6:
                 seen.add(parent);previous=previous_job(parent)
                 if previous['cluster_id']!=body.cluster_id:break
-                pair=[{'role':'user','content':connectors.redact_sensitive_text(previous['question'])},{'role':'assistant','content':connectors.redact_sensitive_text(('Незавершённый ответ: ' if previous['status']!='done' else '')+previous['answer'][:6000])}]
+                previous_answer=previous['answer']
+                if previous['status']=='done' and '\n\n## Анализ модели по доказательствам\n' in previous_answer:
+                    previous_answer=previous_answer.split('\n\n## Анализ модели по доказательствам\n',1)[1]
+                pair=[{'role':'user','content':connectors.redact_sensitive_text(previous['question'])},{'role':'assistant','content':connectors.redact_sensitive_text(('Незавершённый ответ: ' if previous['status']!='done' else '')+previous_answer[:6000])}]
                 size+=len(json.dumps(pair))
                 if size>24000:break
                 history=pair+history;parent=previous.get('previous_id')

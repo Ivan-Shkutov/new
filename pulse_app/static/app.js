@@ -445,35 +445,66 @@ setInterval(async()=>{if(state.page!=='overview'||document.hidden||state.overvie
 
 let analysisState=null, analysisSequence=0, analysisTimer=null;
 function readJson(value,fallback){try{return JSON.parse(value);}catch(_){return fallback;}}
-function safeAnswer(text){
- const root=node('div','chat-answer');let code=null,list=null,table=null;
+function answerInline(target,text,depth=0){
+ // Model output is always text; only these Markdown tokens create DOM nodes.
+ if(depth>3){target.append(document.createTextNode(text));return;}
+ const tokens=/`([^`]+)`|\*\*([^*]+)\*\*/g;let from=0;
+ for(const match of text.matchAll(tokens)){
+  target.append(document.createTextNode(text.slice(from,match.index)));
+  const item=node(match[1]!=null?'code':'strong');
+  if(match[1]!=null)item.textContent=match[1];else answerInline(item,match[2],depth+1);
+  target.append(item);from=match.index+match[0].length;
+ }
+ target.append(document.createTextNode(text.slice(from)));
+}
+function safeAnswer(text,className='chat-answer'){
+ const root=node('div','analysis-content '+className);let code=null,table=null,paragraph=[],lists=[];
+ const flush=()=>{if(paragraph.length){const p=node('p');answerInline(p,paragraph.join('\n'));root.append(p);paragraph=[];}};
  for(const line of String(text||'').split('\n')){
-  if(line.trim().startsWith('```')){code=code?null:node('pre');if(code)root.append(code);list=null;table=null;continue;}
+  if(line.trim().startsWith('```')){flush();code=code?null:node('pre');if(code)root.append(code);lists=[];table=null;continue;}
   if(code){code.textContent+=line+'\n';continue;}
-  const clean=line.replace(/^#{1,6}\s*/,'').replace(/\*\*(.*?)\*\*/g,'$1');
-  if(/^\s*\|.*\|\s*$/.test(clean)){
-   const cells=clean.trim().slice(1,-1).split('|').map(v=>v.trim());
+  if(!line.trim()){flush();table=null;continue;}
+  if(/^\s*\|.*\|\s*$/.test(line)){
+   flush();const cells=line.trim().slice(1,-1).split(/(?<!\\)\|/).map(v=>v.trim().replace(/\\\|/g,'|'));
    if(cells.every(v=>/^:?-+:?$/.test(v)))continue;
-   const row=node('tr');for(const value of cells)row.append(node(table?'td':'th','',value));
+   const row=node('tr');for(const value of cells){const cell=node(table?'td':'th');answerInline(cell,value);row.append(cell);}
    if(!table){table=node('table','analysis-table');table.append(append(node('thead'),row),node('tbody'));root.append(append(node('div','table-wrap'),table));}else table.querySelector('tbody').append(row);
-   list=null;continue;
+   lists=[];continue;
   }
   table=null;
-  if(/^\s*[-*]\s+/.test(line)){if(!list){list=node('ul');root.append(list);}list.append(node('li','',clean.replace(/^\s*[-*]\s+/,'')));}
-  else{list=null;root.append(node(/^#{1,6}\s|^\d+[.)]\s/.test(line)?'h3':'p','',clean));}
+  const heading=line.match(/^#{1,6}\s+(.+)$/),entry=line.match(/^(\s*)([-*]|\d+[.)])\s+(.+)$/);
+  if(heading){flush();lists=[];const h=node('h3');answerInline(h,heading[1]);root.append(h);}
+  else if(entry){
+   flush();const indent=entry[1].length,tag=/^\d/.test(entry[2])?'ol':'ul';
+   while(lists.length&&lists.at(-1).indent>indent)lists.pop();
+   if(lists.length&&lists.at(-1).indent===indent&&lists.at(-1).tag!==tag)lists.pop();
+   if(!lists.length||lists.at(-1).indent<indent){const list=node(tag),parent=lists.at(-1)?.element.lastElementChild||root;parent.append(list);lists.push({indent,tag,element:list});}
+   const li=node('li');answerInline(li,entry[3]);lists.at(-1).element.append(li);
+  }else{lists=[];paragraph.push(line);}
  }
- return root;
+ flush();return root;
+}
+function analysisParts(answer){
+ if(!String(answer||'').startsWith('## Проверенные данные Pulse'))return {facts:'',body:answer||''};
+ for(const marker of ['\n\n## Анализ модели по доказательствам\n','\n\n## Незавершённый ответ модели\n']){
+  const at=String(answer||'').indexOf(marker);if(at>=0)return {facts:answer.slice(0,at),body:answer.slice(at+marker.length)};
+ }
+ return String(answer||'').startsWith('## Проверенные данные Pulse')?{facts:answer,body:''}:{facts:'',body:answer||''};
 }
 function showAnalysisJobs(jobs){
- const root=clear('#ai-conversation');
+ const root=$('#ai-conversation'),scroll=root.scrollTop,atBottom=analysisState?.followLatest||root.scrollHeight-scroll-root.clientHeight<80;
+ const expanded=new Set($$('.analysis-sources[open]',root).map(d=>d.dataset.job));root.replaceChildren();
  for(const job of jobs){
-  const turn=node('article','chat-turn'),evidence=readJson(job.evidence,{}),trace=readJson(job.trace,[]);
+  const turn=node('article','chat-turn'),evidence=readJson(job.evidence,{}),trace=readJson(job.trace,[]),parts=analysisParts(job.answer);
+  const missing=(evidence.records||[]).filter(r=>!['ok','partial'].includes(r.status)),partial=(evidence.records||[]).filter(r=>r.status==='partial');
   turn.append(node('div','chat-question',job.question));
-  if(job.answer){
-   if(job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Сбор и анализ продолжаются; ниже уже проверенные факты.':'ИИ не завершил ответ. Собранные факты Pulse сохранены ниже.','warning');
-   turn.append(safeAnswer(job.answer));
-  }
+  if(job.answer&&!job.error&&job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Анализ продолжается…':'Ответ модели не завершён. Сверяйте вывод с доказательствами.','warning');
   if(job.error)notice(turn,job.error,'error');
+  if(parts.body)turn.append(safeAnswer(parts.body));
+  else if(parts.facts){
+   turn.append(node('p','analysis-fallback-label','Сводка Pulse по фактам'),safeAnswer(parts.facts));
+  }
+  if(missing.length||partial.length)turn.append(node('p','analysis-coverage',`Данные ограничены: недоступны ${missing.length}, неполные ${partial.length}. Подробности — в источниках и проверках.`));
   if(/Astra AI HTTP (401|403)/.test(job.error||'')){
    const context={...analysisState.context};
    turn.append(append(node('div','actions'),
@@ -483,17 +514,21 @@ function showAnalysisJobs(jobs){
   if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));
   const review=Array.isArray(trace)?trace.find(t=>t.tool==='answer-review'):null;
   if(review?.warnings?.length)notice(turn,'Проверка ответа: '+review.warnings.join(' '),'warning');
-  if(evidence.records?.length){
-    const missing=evidence.records.filter(r=>!['ok','partial'].includes(r.status)),partial=evidence.records.filter(r=>r.status==='partial');
-    if(missing.length)notice(turn,`Недоступные проверки: ${missing.map(r=>r.check).join('; ')}. Их результат не получен.`,'warning');
-    if(partial.length)notice(turn,`Неполные проверки: ${partial.map(r=>r.check).join('; ')}. Получена часть данных; отсутствие других ошибок не доказано.`,'warning');
+  if(parts.facts||evidence.records||trace?.length){
+   const sources=node('details','analysis-sources');sources.dataset.job=job.id;sources.open=expanded.has(job.id);
+   sources.append(node('summary','',`Источники и проверки${evidence.records?` · ${evidence.records.length} · недоступны ${missing.length} · неполные ${partial.length}`:''}`));
+   if(parts.facts&&parts.body)sources.append(safeAnswer(parts.facts,'analysis-facts'));
+   if(missing.length)notice(sources,`Недоступные проверки: ${missing.map(r=>r.check).join('; ')}. Их результат не получен.`,'warning');
+   if(partial.length)notice(sources,`Неполные проверки: ${partial.map(r=>r.check).join('; ')}. Получена часть данных; отсутствие других ошибок не доказано.`,'warning');
+   if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));sources.append(details);}
+   if(evidence.records)showEvidence(sources,evidence);
+   else if(!analysisState?.context?.chat)sources.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(sources,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));
+   turn.append(sources);
   }
-  if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));turn.append(details);}
-  if(evidence.records)showEvidence(turn,evidence);
-  else if(!analysisState?.context?.chat)turn.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(turn,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));
   root.append(turn);
  }
- const last=root.lastElementChild;if(last&&!['queued','running'].includes(jobs.at(-1)?.status))root.scrollTop+=last.getBoundingClientRect().top-root.getBoundingClientRect().top;else root.scrollTop=root.scrollHeight;
+ root.scrollTop=atBottom?root.scrollHeight:scroll;
+ if(analysisState)analysisState.followLatest=false;
 }
 function forgetAnalysis(){
  clearTimeout(analysisTimer);analysisSequence++;
@@ -510,7 +545,7 @@ async function openAnalysis(context){
  $('#ai-title').textContent=context.chat?'✧ Чат с ИИ':'✧ Анализ проблемы';
  $('#ai-context').textContent=context.chat?`${context.cluster_id&&$('#chat-engine').value==='cluster'?'Движок выбранного кластера: '+context.cluster_id:'Локальная модель напрямую'} · временный диалог. Закрытие удалит переписку из Pulse.`:`${context.cluster_name||context.cluster_id} · ${context.namespace||context.kind||context.metric||'кластер'} · ${context.name||context.title||''}\n${context.title||''} · без сохранения истории`;
  $('#ai-form .ai-presets').classList.toggle('hidden',!!context.chat);
- $('#ai-form [name=analysis_mode]').closest('label').classList.toggle('hidden',!!context.chat);
+ $('#ai-form').elements.analysis_mode.value=context.chat?'extended':'brief';
  $('#ai-form textarea').placeholder=context.chat?'Задайте любой вопрос…':'В чём причина и что проверить первым?';
  $('#ai-form button[type=submit]').disabled=true;
  clear('#ai-conversation').append(node('p','muted',context.chat?'Новый диалог. Можно задать любой вопрос.':'Новый анализ. ИИ получит контекст выбранной проблемы и доступные доказательства.'));
@@ -554,7 +589,7 @@ $('#ai-form').addEventListener('submit',async event=>{
  if(context.id&&!analysisState.jobs.length)body.problem_id=context.id;if(context.metric)body.metric=context.metric;
  $('#ai-form button[type=submit]').disabled=true;
  try{const job=await api(`/sessions/${sid}/messages`,{method:'POST',body});if(sequence!==analysisSequence)return;
- $('#ai-form textarea').value='';await pollAnalysis(job.id,sequence);
+  $('#ai-form textarea').value='';analysisState.followLatest=true;await pollAnalysis(job.id,sequence);
  }catch(e){if(sequence===analysisSequence){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}}
 });
 

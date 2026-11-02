@@ -37,6 +37,7 @@ def main():
             body=route.request.post_data_json;last_request.append(body)
             if not jobs:assert body['problem_id']==issues[0]['id']
             job={'id':f'job-{len(jobs)}','cluster_id':'peoplehub','question':body['question'],'status':'done','answer':'## Вывод\nПричина пока не установлена.\n- Источник: condition Ready=False.\n<script>alert(1)</script>\n| Проверка | Результат |\n| --- | --- |\n| UID | Тестовые данные |\n## Проверка\nСверьте логи kubelet.','context':json.dumps(issues[0]),'evidence':json.dumps({'records':[{'id':'E01','check':'Pod status (fixture)','status':'ok','method':'GET','path':'/api/v1/namespaces/application/pods/test','equivalent_command':'kubectl -n application get pod test -o json','data':{'reason':'Evicted'}}],'unavailable':0}),'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
+            job['answer']='## Проверенные данные Pulse\nСлужебная сводка доказательств [E01].\n\n## Анализ модели по доказательствам\n'+job['answer'].replace('Причина пока не установлена.','**Причина** пока не установлена.').replace('Тестовые данные','`Тестовые данные`')+'\n\n1. Первая проверка\n   - Уточнение проверки\n\n2. Вторая проверка'
             jobs.append(job);route.fulfill(status=202,json={'id':job['id'],'status':'queued'})
         elif '/investigations?' in route.request.url:route.fulfill(json={'items':jobs[::-1]})
         else:route.fulfill(json=jobs[-1])
@@ -116,8 +117,19 @@ def main():
             raise
         assert page.locator('#ai-conversation script').count()==0
         assert '<script>alert(1)</script>' in page.locator('.chat-answer').inner_text()
+        assert 'Служебная сводка' not in page.locator('.chat-answer').inner_text()
+        expect(page.locator('.chat-answer strong')).to_have_text('Причина')
+        expect(page.locator('.analysis-table code')).to_have_text('Тестовые данные')
+        assert page.locator('.chat-answer ol>li>ul').count()==1
+        assert page.locator('.chat-answer>ol').count()==1
+        assert not page.locator('.analysis-sources').evaluate('(e)=>e.open')
+        page.locator('#ai-conversation').evaluate('(e)=>e.scrollTop=0')
+        page.screenshot(path=str(args.screenshots/'analysis-brief.png'),full_page=True)
+        page.locator('.analysis-sources>summary').click()
+        expect(page.locator('.analysis-facts')).to_be_visible()
         page.locator('#ai-form textarea').fill('Что проверить дальше?');page.locator('#ai-form button[type=submit]').click()
         expect(page.locator('.chat-answer')).to_have_count(2)
+        assert page.locator('.analysis-sources').first.evaluate('(e)=>e.open')
         assert len(last_request)==2
         page.get_by_role('button',name='Нужные команды',exact=True).click()
         expect(page.locator('.chat-answer')).to_have_count(3)
@@ -125,6 +137,10 @@ def main():
         assert page.locator('.evidence-journal').count()==3
         assert page.locator('.analysis-table').count()==3
         page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
+        page.set_viewport_size({'width':390,'height':844})
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        form=page.locator('#ai-form').bounding_box();assert form and form['y']+form['height']<=844
+        page.screenshot(path=str(args.screenshots/'ai-mobile.png'),full_page=True)
         page.get_by_role('button',name='Закрыть анализ',exact=True).click()
         expect(page.locator('#ai-conversation')).to_be_empty()
         page.locator('.problem-table-body .ai-spark').first.click()
