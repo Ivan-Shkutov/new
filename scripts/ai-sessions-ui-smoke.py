@@ -32,6 +32,21 @@ with sync_playwright() as p:
   page.locator('#ai-form textarea').fill('Объясни короче');page.locator('#ai-form button[type=submit]').click()
   expect(page.locator('.chat-answer')).to_have_count(2)
   assert any(m['role']=='assistant' for m in requests[-1]['messages'])
+  old=sids[-1]
+  # Reopen through the active navigation link: hash does not change.
+  page.get_by_role('button',name='Закрыть анализ',exact=True).click()
+  page.locator('#navigation a[data-page=chat]').click()
+  expect(page.locator('#ai-form button[type=submit]')).to_be_enabled()
+  expect(page.locator('.chat-turn')).to_have_count(0)
+  assert sids[-1]!=old
+  page.locator('#ai-form textarea').fill('Новый вход в чат');page.locator('#ai-form button[type=submit]').click()
+  expect(page.locator('.chat-answer')).to_have_count(1)
+  assert not any(m['role']=='assistant' for m in requests[-1]['messages'])
+  # Close and reopen in one task, before the old queued close event fires.
+  page.evaluate("document.querySelector('#ai-dialog').close(); document.querySelector('#navigation a[data-page=chat]').click()")
+  expect(page.locator('#ai-dialog')).to_be_visible()
+  expect(page.locator('#ai-form button[type=submit]')).to_be_enabled()
+  expect(page.locator('.chat-turn')).to_have_count(0)
   page.screenshot(path=str(a.screenshots/'general-chat.png'))
   old=sids[-1];page.get_by_role('button',name='Закрыть анализ',exact=True).click();expect(page.locator('#ai-conversation')).to_be_empty()
   for _ in range(50):

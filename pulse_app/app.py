@@ -197,7 +197,9 @@ def create_app(runtime=None, polling=True):
 
     def public_cluster(row):
         cfg = row['config']
-        return {'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}, 'astra_ai':{'enabled':bool(cfg.get('astra_ai',{}).get('enabled')),'url':cfg.get('astra_ai',{}).get('url',''),'model':cfg.get('astra_ai',{}).get('model',''),'has_key':bool(cfg.get('astra_ai',{}).get('api_key'))}}
+        astra={k:v for k,v in cfg.get('astra',{}).items() if k in ('url','cluster_field','cluster_value','namespace_field','pod_field')}
+        astra['has_token']=bool(cfg.get('astra',{}).get('token'))
+        return {'astra':astra,'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}, 'astra_ai':{'enabled':bool(cfg.get('astra_ai',{}).get('enabled')),'url':cfg.get('astra_ai',{}).get('url',''),'model':cfg.get('astra_ai',{}).get('model',''),'has_key':bool(cfg.get('astra_ai',{}).get('api_key'))}}
 
     from . import dashboard, health
     metric_cache = {}
@@ -750,7 +752,7 @@ def create_app(runtime=None, polling=True):
                     update(evidence=json.dumps(connectors.redact_structure(report),ensure_ascii=False))
                 live_report=collect_pod(cfg,body.namespace,body.pod,resolved_context.get('uid',''),cached,progress)
                 from .diagnostics import verified_summary
-                update(answer=verified_summary(live_report),evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False))
+                update(answer=verified_summary(live_report,body.mode),evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False))
                 if not resolved_context.get('uid') and live_report.get('pod',{}).get('uid'):
                     resolved_context['uid']=live_report['pod']['uid']
                     update(context=json.dumps(connectors.redact_structure(resolved_context),ensure_ascii=False))
@@ -770,7 +772,9 @@ def create_app(runtime=None, polling=True):
                 vector_docs=[];vector_note=str(exc)
             docs=docs+connectors.redact_structure(vector_docs)
             trace.append({'tool':'Qdrant + '+state['knowledge'].model,'status':vector_note})
-            incidents = db().rows('SELECT question,solution FROM incidents WHERE cluster_id=? ORDER BY created_at DESC LIMIT 3', (body.cluster_id,))
+            # Volatile dialogs start without transcripts or resolutions from
+            # earlier investigations; follow-up stays inside the current session.
+            incidents = [] if body.session_id else db().rows('SELECT question,solution FROM incidents WHERE cluster_id=? ORDER BY created_at DESC LIMIT 3', (body.cluster_id,))
             incidents=connectors.redact_structure([{'question':r['question'][:1500],'solution':r['solution'][:3000]} for r in incidents])
             safe_question=connectors.redact_sensitive_text(body.question)
             messages = [
@@ -796,7 +800,7 @@ def create_app(runtime=None, polling=True):
                 trace.append({'tool':'engine','status':'Astra AI / SSE'})
                 update(trace=json.dumps(trace,ensure_ascii=False))
                 def partial(text):
-                    prefix=(verified_summary(live_report)+'\n\n## Анализ модели по доказательствам\n') if live_report else ''
+                    prefix=(verified_summary(live_report,body.mode)+'\n\n## Анализ модели по доказательствам\n') if live_report else ''
                     update(answer=prefix+text)
                 answer=astra_chat(cfg['astra_ai'],messages,partial)
             elif cfg.get('holmes',{}).get('enabled'):
@@ -809,7 +813,7 @@ def create_app(runtime=None, polling=True):
                 from .diagnostics import verified_summary,review_answer
                 warnings=review_answer(live_report,answer)
                 trace.append({'tool':'answer-review','status':'needs_review' if warnings else 'checked','warnings':warnings,'note':'Проверены ссылки и явная причина; семантическая точность не гарантируется.'})
-                answer=verified_summary(live_report)+'\n\n## Анализ модели по доказательствам\n'+answer
+                answer=verified_summary(live_report,body.mode)+'\n\n## Анализ модели по доказательствам\n'+answer
             answer=connectors.redact_sensitive_text(answer)
             update(trace=json.dumps(connectors.redact_structure(trace),ensure_ascii=False))
             update(status='done',answer=answer)
@@ -824,7 +828,7 @@ def create_app(runtime=None, polling=True):
             if live_report:
                 from .diagnostics import verified_summary
                 partial=exc.partial if isinstance(exc,IncompleteAnswer) else ''
-                update(answer=verified_summary(live_report)+('\n\n## Незавершённый ответ модели\n'+partial if partial else ''))
+                update(answer=verified_summary(live_report,body.mode)+('\n\n## Незавершённый ответ модели\n'+partial if partial else ''))
             elif isinstance(exc,IncompleteAnswer):update(answer=exc.partial)
             partial_trace=locals().get('trace',[])+[{'tool':'analysis','status':'failed'}]
             update(status='failed',error=error,trace=json.dumps(connectors.redact_structure(partial_trace),ensure_ascii=False))

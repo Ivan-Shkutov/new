@@ -228,13 +228,21 @@ def collect_pod(config, namespace, name, uid='', cached=None, progress=None):
     return Collector(config,progress).collect(namespace,name,uid,cached)
 
 
-def verified_summary(report):
+def verified_summary(report, mode=None):
     lines=['## Проверенные данные Pulse']
     cause=emptydir_cause(report)
     if cause:
         lines.append('Причина завершения по status.message: превышен лимит EmptyDir `'+cause['volume']+'` — `'+cause['limit']+'`. Это ограничение временного тома Pod; заполнение корневого диска узла этим не доказано.')
     for finding in report.get('findings',[]):lines.append('- ['+finding['source']+'] '+finding['fact'])
     lines.append(f"Проверок: {len(report.get('records',[]))}; недоступны: {report.get('unavailable',0)}; неполные данные: {report.get('partial',0)}. Журнал — в доказательствах расследования.")
+    if mode=='impact':
+        lines.append('## Последствия: оценка Pulse по собранным фактам')
+        if report.get('pod',{}).get('phase')=='Failed':
+            lines.append('Подтверждено: выбранный Pod имеет терминальную фазу Failed; он не является работающей репликой. Это относится к состоянию в указанном источнике, а не доказывает текущий простой всего сервиса.')
+        if cause:
+            lines.append('Возможные последствия: перерыв в работе приложения этой реплики; потеря временных файлов тома '+cause['volume']+' при удалении Pod. Факт потери данных и длительность перерыва не установлены.')
+        lines.append('Для оценки текущего влияния нужны готовность Pod-замены, доступные endpoints и история метрик/логов. Успешное выполнение запроса само по себе не подтверждает отсутствие проблем; статус ok не означает непустой результат.')
+        lines.append('Постоянная потеря данных, отказ всего кластера и причина роста файлов по этим сведениям не подтверждены. Недоступные логи не считаются проверенными.')
     return c.redact_sensitive_text('\n'.join(lines))
 
 

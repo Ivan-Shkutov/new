@@ -76,7 +76,9 @@ async function loadClusters() {
   select.value = state.cluster;
 }
 async function navigate() {
-  const page = location.hash.slice(1) || 'overview'; state.page = Object.hasOwn(titles, page) ? page : 'overview';
+  const page = location.hash.slice(1) || 'overview',nextPage=Object.hasOwn(titles,page)?page:'overview';
+  if(state.page!==nextPage&&$('#ai-dialog').open)$('#ai-dialog').close();
+  state.page = nextPage;
   $$('.page').forEach(item => item.classList.toggle('hidden', item.id !== `page-${state.page}`));
   $$('#navigation a').forEach(item => { const active = item.dataset.page === state.page; item.classList.toggle('active', active); if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
   $('#page-title').textContent = titles[state.page]; $('#breadcrumb').textContent = titles[state.page].toUpperCase();
@@ -357,6 +359,7 @@ function openCluster(cluster = null) {
   form.elements.holmes_enabled.checked=!!cluster?.holmes?.enabled;form.elements.holmes_url.value=cluster?.holmes?.url||'';form.elements.holmes_model.value=cluster?.holmes?.model||'pulse-local';$('#holmes-message').textContent='';$('#holmes-bootstrap').disabled=!cluster;$('#holmes-test').disabled=!cluster;$('#holmes-accept').disabled=!cluster;
   form.elements.astra_ai_enabled.checked=!!cluster?.astra_ai?.enabled;form.elements.astra_ai_url.value=cluster?.astra_ai?.url||'';form.elements.astra_ai_model.value=cluster?.astra_ai?.model||'qwen';$('#astra-ai-state').textContent=cluster?.astra_ai?.has_key?'Токен сохранён. Значение не возвращается.':'Токен не сохранён.';$('#astra-ai-message').textContent='';$('#astra-ai-test').disabled=!cluster;
   const metrics=cluster?.metrics||{};form.elements.metrics_transport.value=metrics.transport||'direct';for(const key of ['url','namespace','service','port','mode'])if(metrics[key]!=null)form.elements['metrics_'+key].value=metrics[key];form.elements.metrics_labels.value=metrics.labels?JSON.stringify(metrics.labels):'';$('#metrics-message').textContent='';clear('#metrics-candidates').append(new Option('Выберите после поиска',''));$('#metrics-discover').disabled=!cluster;$('#metrics-test').disabled=!cluster;
+  const astra=cluster?.astra||{};for(const key of ['url','cluster_field','cluster_value','namespace_field','pod_field'])if(astra[key]!=null)form.elements['astra_'+key].value=astra[key];
   updateMetricsFields();state.metricsFormInitial=metricsFormFingerprint(form);
   $('#cluster-dialog-title').textContent = cluster ? `Настроить · ${cluster.name}` : 'Добавить кластер';
   $('#cluster-dialog').showModal();
@@ -537,8 +540,12 @@ $('#analysis-engine-test').addEventListener('click',event=>busy(event.currentTar
  try{await api(path,{method:'POST'});if(sequence===analysisSequence)out.textContent='Авторизация и завершение ответа: OK. Верность диагноза проверяйте по доказательствам конкретной ошибки.';}
  catch(e){if(sequence===analysisSequence)out.textContent=errorText(e);}
 }));
-$('#ai-dialog').addEventListener('close',forgetAnalysis);
+// A delayed close event from an old dialog must not erase a newly opened one.
+$('#ai-dialog').addEventListener('close',()=>{if(!$('#ai-dialog').open)forgetAnalysis();});
 window.addEventListener('pagehide',forgetAnalysis);
+$('#navigation a[data-page=chat]').addEventListener('click',event=>{
+ if(state.page==='chat'){event.preventDefault();openAnalysis({cluster_id:state.cluster,chat:true});}
+});
 $('#new-chat').addEventListener('click',()=>openAnalysis({cluster_id:state.cluster,chat:true}));
 $('#ai-form').addEventListener('submit',async event=>{
  event.preventDefault();if(!analysisState?.session)return;

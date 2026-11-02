@@ -10,7 +10,8 @@ kube={'apiVersion':'v1','kind':'Config','current-context':'test','contexts':[{'n
 with sync_playwright() as pw:
     browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
     context=browser.new_context(http_credentials={'username':'pulse','password':a.password_file.read_text().strip()})
-    created=context.request.post(a.base_url+'/api/clusters',data={'id':cid,'name':cid,'enabled':False,'kubeconfig':json.dumps(kube)},headers={'X-Pulse-Request':'1'});assert created.status==201
+    logs={'url':'http://astra.test','token':'logs-'+secret,'cluster_field':'labels.cluster','cluster_value':cid,'namespace_field':'labels.pod_namespace','pod_field':'labels.pod_name'}
+    created=context.request.post(a.base_url+'/api/clusters',data={'id':cid,'name':cid,'enabled':False,'kubeconfig':json.dumps(kube),'astra':logs},headers={'X-Pulse-Request':'1'});assert created.status==201
     try:
         page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         page.route('**/api/clusters/*/astra-ai-test',lambda r:r.fulfill(json={'ok':True,'answer':'Тестовый ответ','stream_completed':True}))
@@ -20,10 +21,14 @@ with sync_playwright() as pw:
             summary=page.get_by_text('ИИ Astra · анализ через её API',exact=True)
             if summary.locator('..').get_attribute('open') is None:summary.click()
         open_settings();form=page.locator('#cluster-form')
+        assert form.locator('[name=astra_url]').input_value()==logs['url']
+        assert form.locator('[name=astra_pod_field]').input_value()=='labels.pod_name'
+        assert form.locator('[name=astra_token]').input_value()==''
         form.locator('[name=astra_ai_enabled]').check();form.locator('[name=astra_ai_url]').fill('http://astra.test/api/v1/settings/ai/request/chat/completions');form.locator('[name=astra_ai_api_key]').fill(secret)
         form.get_by_role('button',name='Сохранить кластер',exact=True).click();page.locator('#cluster-dialog').wait_for(state='hidden')
         data=context.request.get(a.base_url+'/api/clusters').json();row=next(r for r in data['items'] if r['id']==cid)
         assert row['astra_ai']['enabled'] and row['astra_ai']['has_key'] and secret not in json.dumps(data)
+        assert row['astra']['has_token'] and row['astra']['cluster_value']==cid
         open_settings();assert form.locator('[name=astra_ai_api_key]').input_value()==''
         page.get_by_role('button',name='Проверить поток Astra AI',exact=True).click();expect(page.locator('#astra-ai-message')).to_contain_text('Поток завершён')
         page.get_by_text('HolmesGPT · отдельный read-only агент',exact=True).click()
