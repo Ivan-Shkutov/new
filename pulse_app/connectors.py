@@ -511,9 +511,20 @@ def llm_chat(settings: dict, messages: list) -> str:
     except (KeyError, IndexError, TypeError):
         raise ConnectorError("LLM returned an unsupported completion response") from None
     if not isinstance(result, str) or not result.strip():
+        if message.get('reasoning_content'):
+            raise ConnectorError('Local LLM returned reasoning_content but no text answer; check the model chat template, thinking mode and output budget')
         raise ConnectorError("LLM returned no text; tools and autonomous actions are not enabled")
     if message.get('tool_calls') or message.get('function_call'):
         raise ConnectorError('Local LLM requested tools; native mode never executes model commands')
+    visible=result.lstrip()
+    if visible.startswith('<think>'):
+        end=visible.find('</think>')
+        if end<0:
+            from .astra_ai import IncompleteAnswer
+            raise IncompleteAnswer('Локальная модель не завершила служебный блок <think>; итоговый ответ не получен','')
+        result=visible[end+len('</think>'):].strip()
+        if not result:
+            raise ConnectorError('Local LLM returned thinking but no text answer; check thinking mode and output budget')
     if choice.get('finish_reason')!='stop':
         from .astra_ai import IncompleteAnswer
         raise IncompleteAnswer('Локальная модель не подтвердила завершение ответа: '+str(choice.get('finish_reason'))[:40],result)

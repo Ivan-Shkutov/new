@@ -242,13 +242,14 @@ def health_check(runtime: Path):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Pulse Clusters 0.14.6 lifecycle')
+    parser = argparse.ArgumentParser(description='Pulse Clusters 0.14.7 lifecycle')
     parser.add_argument('--runtime', type=Path, default=Path(os.environ.get('PULSE_RUNTIME', ROOT / 'runtime')))
     sub = parser.add_subparsers(dest='command', required=True)
     init = sub.add_parser('init'); init.add_argument('--port', type=int, default=8090)
     for name in ('start', 'start-offline', 'stop', 'status', 'logs', 'build', 'dev', 'check'):
         sub.add_parser(name)
     doctor=sub.add_parser('doctor');doctor.add_argument('--cluster',default='peoplehub')
+    llm_check=sub.add_parser('llm-check');llm_check.add_argument('--case',choices=['all','service','emptydir','exit137','network'],default='all');llm_check.add_argument('--show-answers',action='store_true')
     backup = sub.add_parser('backup'); backup.add_argument('--output-dir', type=Path, default=ROOT / 'backups')
     restore = sub.add_parser('restore'); restore.add_argument('archive', type=Path); restore.add_argument('--confirm-restore', action='store_true')
     export = sub.add_parser('export-image'); export.add_argument('output', type=Path)
@@ -271,6 +272,8 @@ def main(argv=None):
             os.execve(str(interpreter) if interpreter.exists() else sys.executable, [str(interpreter) if interpreter.exists() else sys.executable, '-m', 'uvicorn', 'pulse_app.app:app', '--host', '127.0.0.1', '--port', cfg.get('PULSE_PORT', '8090')], env)
         elif args.command == 'doctor':
             subprocess.run([sys.executable,str(ROOT/'scripts/pulse-doctor.py'),'--runtime',str(runtime),'--cluster',args.cluster],check=True)
+        elif args.command == 'llm-check':
+            subprocess.run([sys.executable,str(ROOT/'scripts/pulse-llm-check.py'),'--runtime',str(runtime),'--case',args.case,*(['--show-answers'] if args.show_answers else [])],check=True)
         elif args.command == 'check':
             health_check(runtime)
         elif args.command == 'export-image':
@@ -278,7 +281,7 @@ def main(argv=None):
             output.parent.mkdir(parents=True, exist_ok=True)
             if output.exists():
                 raise ValueError('Output file exists')
-            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.14.6'], check=True)
+            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.14.7'], check=True)
             Path(str(output) + '.sha256').write_text(f'{file_hash(output)}  {output.name}\n')
         elif args.command in ('backup', 'restore'):
             if args.command == 'restore' and not args.confirm_restore:

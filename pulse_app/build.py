@@ -10,7 +10,7 @@ from . import __version__
 @lru_cache(maxsize=1)
 def identity():
     root=Path(__file__).resolve().parents[1];package=root/'pulse_app'
-    files=sorted(p for p in package.rglob('*') if p.is_file() and p.suffix in ('.py','.js','.css','.html') and '__pycache__' not in p.parts)
+    files=sorted(p for p in package.rglob('*') if p.is_file() and p.suffix in ('.py','.js','.css','.html','.md') and '__pycache__' not in p.parts)
     if (root/'requirements.txt').is_file():files.append(root/'requirements.txt')
     digest=hashlib.sha256()
     for path in sorted(files):

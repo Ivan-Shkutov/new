@@ -213,6 +213,24 @@ def test_llm_invalid_or_empty_result_is_failure(monkeypatch):
         c.llm_chat({"url": "http://127.0.0.1:8002", "model": "qwen"}, [{"role": "user", "content": "why"}])
 
 
+@pytest.mark.parametrize('finish',['stop','length'])
+def test_local_think_block_is_not_the_visible_answer(monkeypatch,finish):
+    from pulse_app.astra_ai import IncompleteAnswer
+    install_transport(monkeypatch,lambda request:httpx.Response(200,json={'choices':[{'message':{'content':'\n<think>PRIVATE-REASONING</think>\nОтвет: проверьте endpoints.','reasoning_content':'ALSO-PRIVATE'},'finish_reason':finish}]}))
+    cfg={'url':'http://127.0.0.1:8002/v1','model':'qwen'}
+    if finish=='stop':assert c.llm_chat(cfg,[{'role':'user','content':'why'}])=='Ответ: проверьте endpoints.'
+    else:
+        with pytest.raises(IncompleteAnswer) as exc:c.llm_chat(cfg,[{'role':'user','content':'why'}])
+        assert exc.value.partial=='Ответ: проверьте endpoints.'
+
+
+@pytest.mark.parametrize('content,reasoning',[('<think>PRIVATE-REASONING',''),('', 'PRIVATE-REASONING'),('<think>PRIVATE-REASONING</think>','')])
+def test_reasoning_without_a_final_answer_is_a_failure_without_private_text(monkeypatch,content,reasoning):
+    install_transport(monkeypatch,lambda request:httpx.Response(200,json={'choices':[{'message':{'content':content,'reasoning_content':reasoning},'finish_reason':'length'}]}))
+    with pytest.raises(c.ConnectorError) as exc:c.llm_chat({'url':'http://127.0.0.1:8002/v1','model':'qwen'},[{'role':'user','content':'why'}])
+    assert 'PRIVATE' not in str(exc.value) and 'PRIVATE' not in getattr(exc.value,'partial','')
+
+
 def test_common_log_credentials_redacted():
     text = 'Authorization: Bearer abcdefg password="hello world" token=xyz {"api_key":"supersecret"} https://user:pass@example.com/a harmless=42'
     value = c.redact_sensitive_text(text)
