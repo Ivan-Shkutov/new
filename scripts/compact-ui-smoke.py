@@ -26,7 +26,7 @@ def main():
         row=dict(data['issues'][i%len(data['issues'])]);row['name']+=f'-{i:02d}'
         row['id']=hashlib.sha256(str(i).encode()).hexdigest()[:32];issues.append(row)
     all_issues=issues;issues=all_issues[:1]
-    jobs=[];errors=[];last_request=[]
+    jobs=[];errors=[];last_request=[];broken=[False]
     def problem_route(route):
         q=parse_qs(urlparse(route.request.url).query);rows=issues
         if q.get('q'):rows=[i for i in rows if q['q'][0].lower() in json.dumps(i).lower()]
@@ -38,6 +38,9 @@ def main():
             if not jobs:assert body['problem_id']==issues[0]['id']
             job={'id':f'job-{len(jobs)}','cluster_id':'peoplehub','question':body['question'],'status':'done','answer':'## Вывод\nПричина пока не установлена.\n- Источник: condition Ready=False.\n<script>alert(1)</script>\n| Проверка | Результат |\n| --- | --- |\n| UID | Тестовые данные |\n## Проверка\nСверьте логи kubelet.','context':json.dumps(issues[0]),'evidence':json.dumps({'records':[{'id':'E01','check':'Pod status (fixture)','status':'ok','method':'GET','path':'/api/v1/namespaces/application/pods/test','equivalent_command':'kubectl -n application get pod test -o json','data':{'reason':'Evicted'}}],'unavailable':0}),'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
             job['answer']='## Проверенные данные Pulse\nСлужебная сводка доказательств [E01].\n\n## Анализ модели по доказательствам\n'+job['answer'].replace('Причина пока не установлена.','**Причина** пока не установлена.').replace('Тестовые данные','`Тестовые данные`')+'\n\n1. Первая проверка\n   - Уточнение проверки\n\n2. Вторая проверка'
+            if broken[0]:
+                job.update(status='failed',error='Обрыв или ошибка сети/TLS при чтении Astra AI; ответ не считается завершённым',answer='## Проверенные данные Pulse\nПодтверждено превышение EmptyDir [E01].\n\n## Незавершённый ответ модели\nOOM исключён по коду 137.\nkubectl get deployment unfinished')
+                report=json.loads(job['evidence']);report['pod']={'phase':'Failed','reason':'Evicted','message':'Usage of EmptyDir volume "data" exceeds the limit "1Gi".','source_type':'cached'};report['findings']=[{'source':'E01','fact':'Pod phase=Failed; reason=Evicted.'}];job['evidence']=json.dumps(report)
             jobs.append(job);route.fulfill(status=202,json={'id':job['id'],'status':'queued'})
         elif '/investigations?' in route.request.url:route.fulfill(json={'items':jobs[::-1]})
         else:route.fulfill(json=jobs[-1])
@@ -141,6 +144,22 @@ def main():
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         form=page.locator('#ai-form').bounding_box();assert form and form['y']+form['height']<=844
         page.screenshot(path=str(args.screenshots/'ai-mobile.png'),full_page=True)
+        broken[0]=True
+        page.get_by_role('button',name='Сжатый анализ',exact=True).click()
+        expect(page.locator('.chat-answer')).to_have_count(4)
+        latest=page.locator('.chat-turn').last
+        expect(latest.locator('.chat-answer')).to_contain_text('превышен лимит EmptyDir')
+        assert 'OOM исключён' not in latest.locator('.chat-answer').inner_text()
+        assert 'unfinished' not in latest.locator('.chat-answer').inner_text()
+        assert not latest.locator('.analysis-sources').evaluate('(e)=>e.open')
+        expect(latest.locator('.analysis-draft-text')).to_be_hidden()
+        assert 'OOM исключён' not in latest.inner_text()
+        latest.locator('.analysis-sources>summary').click()
+        assert not latest.locator('.analysis-draft').evaluate('(e)=>e.open')
+        latest.locator('.analysis-draft>summary').click()
+        expect(latest.locator('.analysis-draft-text')).to_contain_text('OOM исключён')
+        expect(latest.locator('.analysis-facts')).to_contain_text('Подтверждено превышение EmptyDir')
+        page.screenshot(path=str(args.screenshots/'interrupted-reply.png'),full_page=True)
         page.get_by_role('button',name='Закрыть анализ',exact=True).click()
         expect(page.locator('#ai-conversation')).to_be_empty()
         page.locator('.problem-table-body .ai-spark').first.click()

@@ -491,6 +491,16 @@ function analysisParts(answer){
  }
  return String(answer||'').startsWith('## Проверенные данные Pulse')?{facts:answer,body:''}:{facts:'',body:answer||''};
 }
+function conciseFacts(report){
+ const pod=report.pod||{},cell=value=>String(value||'').replace(/[|`\r\n]/g,' ').slice(0,220);
+ if(!pod.phase&&!pod.reason)return 'Причина по имеющимся данным не установлена. Подробности доступны в источниках.';
+ if(pod.source_type==='unavailable')return 'Исходный Pod недоступен. Причина его завершения не подтверждена.';
+ const cause=pod.reason==='Evicted'&&String(pod.message||'').match(/Usage of EmptyDir volume ["']([^"']+)["'] exceeds the limit ["']([^"']+)["']/i);
+ const finding=(report.findings||[]).find(f=>String(f.fact||'').startsWith('Pod phase=')),ref=/^E\d{2}$/.test(finding?.source||'')?' ['+finding.source+']':'';
+ const observed=pod.source_type==='cached'?'По сохранённому наблюдению: ':'';
+ const what=cause?`Pod выселен: превышен лимит EmptyDir \`${cell(cause[1])}\` — \`${cell(cause[2])}\`.${ref}`:`Pod: ${cell(pod.phase)||'фаза неизвестна'}${pod.reason?' / '+cell(pod.reason):''}.${ref}`;
+ return '| Параметр | Значение |\n| --- | --- |\n| Что произошло | '+observed+what+' |\n| Влияние | Текущий простой сервиса по одному этому факту не установлен. |\n| Что проверить первым | '+(cause?'Готовность замещающего Pod; затем какие файлы заполняют том '+cell(cause[1])+'.':'Состояние выбранного объекта и связанных с ним реплик в источниках.')+' |';
+}
 function showAnalysisJobs(jobs){
  const root=$('#ai-conversation'),scroll=root.scrollTop,atBottom=analysisState?.followLatest||root.scrollHeight-scroll-root.clientHeight<80;
  const expanded=new Set($$('.analysis-sources[open]',root).map(d=>d.dataset.job));root.replaceChildren();
@@ -498,13 +508,14 @@ function showAnalysisJobs(jobs){
   const turn=node('article','chat-turn'),evidence=readJson(job.evidence,{}),trace=readJson(job.trace,[]),parts=analysisParts(job.answer);
   const missing=(evidence.records||[]).filter(r=>!['ok','partial'].includes(r.status)),partial=(evidence.records||[]).filter(r=>r.status==='partial');
   turn.append(node('div','chat-question',job.question));
-  if(job.answer&&!job.error&&job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Анализ продолжается…':'Ответ модели не завершён. Сверяйте вывод с доказательствами.','warning');
-  if(job.error)notice(turn,job.error,'error');
-  if(parts.body)turn.append(safeAnswer(parts.body));
+  const failed=job.status==='failed',draft=failed?parts.body:'';
+  if(job.answer&&!job.error&&job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Анализ продолжается…':'Ответ модели не завершён.','warning');
+  if(job.error)notice(turn,/Astra AI HTTP (401|403)/.test(job.error)?'Astra AI: доступ отклонён. Проверьте токен и права.':'Ответ ИИ не завершён. Подробности ошибки — в источниках.','error');
+  if(parts.body&&!failed)turn.append(safeAnswer(parts.body));
   else if(parts.facts){
-   turn.append(node('p','analysis-fallback-label','Сводка Pulse по фактам'),safeAnswer(parts.facts));
+   turn.append(node('p','analysis-fallback-label','Кратко по данным Pulse'),safeAnswer(conciseFacts(evidence)));
   }
-  if(missing.length||partial.length)turn.append(node('p','analysis-coverage',`Данные ограничены: недоступны ${missing.length}, неполные ${partial.length}. Подробности — в источниках и проверках.`));
+  if(missing.length||partial.length)turn.append(node('p','analysis-coverage','Данные для вывода ограничены. Подробности — в источниках.'));
   if(/Astra AI HTTP (401|403)/.test(job.error||'')){
    const context={...analysisState.context};
    turn.append(append(node('div','actions'),
@@ -513,11 +524,14 @@ function showAnalysisJobs(jobs){
   }
   if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));
   const review=Array.isArray(trace)?trace.find(t=>t.tool==='answer-review'):null;
-  if(review?.warnings?.length)notice(turn,'Проверка ответа: '+review.warnings.join(' '),'warning');
-  if(parts.facts||evidence.records||trace?.length){
+  if(review?.warnings?.length)notice(turn,'Вывод модели требует проверки. Замечания — в источниках.','warning');
+  if(parts.facts||evidence.records||trace?.length||job.error||draft){
    const sources=node('details','analysis-sources');sources.dataset.job=job.id;sources.open=expanded.has(job.id);
    sources.append(node('summary','',`Источники и проверки${evidence.records?` · ${evidence.records.length} · недоступны ${missing.length} · неполные ${partial.length}`:''}`));
-   if(parts.facts&&parts.body)sources.append(safeAnswer(parts.facts,'analysis-facts'));
+   if(job.error)notice(sources,job.error,'error');
+   if(parts.facts)sources.append(safeAnswer(parts.facts,'analysis-facts'));
+   if(draft){const details=node('details','analysis-draft');details.append(node('summary','','Незавершённый текст ИИ'),node('p','muted','Поток оборвался. Этот фрагмент не считается завершённым анализом и может содержать ошибочные выводы.'),safeAnswer(draft,'analysis-draft-text'));sources.append(details);}
+   if(review?.warnings?.length)notice(sources,'Проверка ответа: '+review.warnings.join(' '),'warning');
    if(missing.length)notice(sources,`Недоступные проверки: ${missing.map(r=>r.check).join('; ')}. Их результат не получен.`,'warning');
    if(partial.length)notice(sources,`Неполные проверки: ${partial.map(r=>r.check).join('; ')}. Получена часть данных; отсутствие других ошибок не доказано.`,'warning');
    if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));sources.append(details);}

@@ -791,6 +791,8 @@ def create_app(runtime=None, polling=True):
                 seen.add(parent);previous=previous_job(parent)
                 if previous['cluster_id']!=body.cluster_id:break
                 previous_answer=previous['answer']
+                if previous['status']=='failed' and '\n\n## Незавершённый ответ модели\n' in previous_answer:
+                    previous_answer=previous_answer.split('\n\n## Незавершённый ответ модели\n',1)[0]
                 if previous['status']=='done' and '\n\n## Анализ модели по доказательствам\n' in previous_answer:
                     previous_answer=previous_answer.split('\n\n## Анализ модели по доказательствам\n',1)[1]
                 pair=[{'role':'user','content':connectors.redact_sensitive_text(previous['question'])},{'role':'assistant','content':connectors.redact_sensitive_text(('Незавершённый ответ: ' if previous['status']!='done' else '')+previous_answer[:6000])}]
