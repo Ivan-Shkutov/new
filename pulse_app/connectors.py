@@ -428,7 +428,7 @@ def _field(row, path):
     return value
 
 
-def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = None, end: str | None = None) -> dict:
+def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = None, end: str | None = None, *, deadline=None) -> dict:
     """Astra HTTP adapter; validate payload against the installed Astra Swagger."""
     _name(namespace, "namespace")
     _name(pod, "pod")
@@ -464,10 +464,18 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
     rows, scanned, truncated = [], 0, False
     with _client(settings) as client:
         for page in range(MAX_PAGES):
+            request_options = {}
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConnectorError("Collection time budget exceeded")
+                # Do not start a new page with the client's full timeout when
+                # the shared diagnostic budget is nearly exhausted.
+                request_options = {"deadline": deadline, "timeout": min(10, remaining)}
             payload = {"time": {"from": start, "to": end},
                        "query": " AND ".join(f"{field}:{json.dumps(value)}" for field, value in zip(fields, expected)),
                        "paging": {"page": page, "size": 250}}
-            data = _request(client, "POST", _url(settings.get("url")) + "/api/v1/logs/search/monitorLogs", json=payload)
+            data = _request(client, "POST", _url(settings.get("url")) + "/api/v1/logs/search/monitorLogs", json=payload, **request_options)
             source = data.get("data", data) if isinstance(data, dict) else data
             if isinstance(source, dict):
                 source = next((source[k] for k in ("items", "logs", "records", "content") if isinstance(source.get(k), list)), None)

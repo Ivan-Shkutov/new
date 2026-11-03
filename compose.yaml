@@ -1,6 +1,6 @@
 services:
   pulse:
-    image: pulse-clusters:0.14.7
+    image: pulse-clusters:0.15.0
     build:
       context: .
       args:

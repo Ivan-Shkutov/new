@@ -51,8 +51,8 @@ MODE_PROMPTS = {
 }
 
 
-def build_system_prompt(mode, chat, selected_skills):
-    style=('Обычный диалог: отвечай коротко по существу вопроса, по умолчанию до 150 слов. '
+def build_system_prompt(mode, chat, selected_skills, response_contract=None):
+    style=response_contract or ('Обычный диалог: отвечай коротко по существу вопроса, по умолчанию до 150 слов. '
            'Развёрнутый ответ давай по явному запросу. Для общих вопросов не придумывай связь с кластером. '
            'Состояние выбранного кластера описывай только по приложенным данным и с их ограничениями.'
            if chat and mode=='extended' else MODE_PROMPTS[mode])

@@ -183,7 +183,7 @@ def create_app(runtime=None, polling=True):
 
     @app.get('/static/{name}', dependencies=[Depends(require_admin)])
     def static(name: str):
-        if name not in ('app.js', 'style.css'):
+        if name not in ('app.js', 'style.css', 'scenarios.js', 'scenarios.css'):
             raise HTTPException(404)
         return FileResponse(Path(__file__).parent / 'static' / name)
 
@@ -706,9 +706,24 @@ def create_app(runtime=None, polling=True):
         mode: str = Field(default='extended',pattern='^(brief|extended|causes|impact|commands)$')
         namespace: Optional[str] = Field(default=None,max_length=253)
         pod: Optional[str] = Field(default=None,max_length=253)
+        scenario: Optional[str] = Field(default=None,pattern='^(brief|deep|causes|impact|plan|recovery)$')
 
-    def investigate(jid, body, cfg, llm, resolved_context):
+    def scenario_source_stamp(config, llm):
+        # Bind every run to its actual sources, including edits that do not
+        # replace kubeconfig. The digest never exposes credentials to clients.
+        value=json.dumps({'cluster':config,'llm':llm},sort_keys=True,ensure_ascii=False)
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    class ScenarioSourcesChanged(connectors.ConnectorError):
+        pass
+
+    def investigate(jid, body, cfg, llm, resolved_context, source_stamp=None):
         live_report={}
+        def check_scenario_sources():
+            if not body.scenario:return
+            current=db().cluster(body.cluster_id)
+            if not current or scenario_source_stamp(current['config'],db().settings().get('llm',{}))!=source_stamp:
+                raise ScenarioSourcesChanged('Подключение или настройки источника изменились. Откройте диагностику заново.')
         def update(**fields):
             if body.session_id:
                 sessions.update(body.session_id, jid, fields)
@@ -721,7 +736,7 @@ def create_app(runtime=None, polling=True):
         try:
             update(status='running')
             from .cluster_chat import inventory_intent,inventory_report,inventory_answer,compact_snapshot
-            intent=inventory_intent(body.question) if body.cluster_id and not body.pod and not body.namespace else None
+            intent=inventory_intent(body.question) if body.cluster_id and not body.pod and not body.namespace and not body.scenario else None
             if intent:
                 if cluster(body.cluster_id)['config'].get('generation')!=cfg.get('generation'):
                     raise connectors.ConnectorError('Подключение изменилось. Повторите запрос.')
@@ -732,12 +747,13 @@ def create_app(runtime=None, polling=True):
                 return
             from .runbooks import build_system_prompt,select_runbooks,POLICY_ID,POLICY_VERSION
             trace=[]
+            check_scenario_sources()
             if body.cluster_id and cluster(body.cluster_id)['config'].get('generation')!=cfg.get('generation'):
                 raise connectors.ConnectorError('Подключение изменилось. Запустите анализ заново.')
             snap = snapshot(body.cluster_id) if body.cluster_id else {'resources':{},'complete':False}
             trace.append({'tool':'Kubernetes snapshot','status':'ok' if snap.get('complete') else 'partial','observed_at':snap.get('observed_at')})
             facts = compact_snapshot(snap,body.namespace)
-            if body.metric:
+            if body.metric and not body.scenario:
                 metric_data=dashboard_metric_route(body.cluster_id,'1h')
                 facts={'metric_context':metric_data,**facts}
                 trace.append({'tool':'Prometheus cluster metrics','status':'available' if metric_data.get('configured') else 'unconfigured'})
@@ -748,9 +764,36 @@ def create_app(runtime=None, polling=True):
             if body.pod and body.namespace:
                 from .diagnostics import collect_pod,model_evidence
                 cached=next((p for p in snap.get('resources',{}).get('pods',{}).get('items',[]) if p.get('metadata',{}).get('namespace')==body.namespace and p.get('metadata',{}).get('name')==body.pod),None)
+                expected_uid=resolved_context.get('uid','')
+                if body.scenario and expected_uid and (cached or {}).get('metadata',{}).get('uid')!=expected_uid:
+                    # An old Pod can disappear from the refreshed snapshot.
+                    # Reuse only its measured identity/owner lineage from this
+                    # bound session, never an earlier model answer or a new UID.
+                    for previous in reversed(list(sessions.get(body.session_id)['jobs'].values())):
+                        if previous['id']==jid or not previous.get('scenario'):continue
+                        try:historical=json.loads(previous.get('evidence') or '{}')
+                        except (TypeError,ValueError):continue
+                        if historical.get('stale_sources'):continue
+                        for record in historical.get('records',[]):
+                            data=record.get('data') or {};meta=data.get('metadata',{}) if isinstance(data,dict) else {}
+                            if (record.get('group')=='pod' and record.get('status')=='ok'
+                                    and meta.get('uid')==expected_uid and meta.get('namespace')==body.namespace
+                                    and meta.get('name')==body.pod and isinstance(data.get('status'),dict)
+                                    and isinstance(data.get('spec'),dict)):
+                                cached={'metadata':meta,'status':data['status'],'spec':data['spec']}
+                                break
+                        if (cached or {}).get('metadata',{}).get('uid')==expected_uid:break
                 def progress(report):
+                    nonlocal live_report
+                    live_report=report
+                    if body.scenario:
+                        sessions.get(body.session_id)
+                        check_scenario_sources()
+                        records=report.get('records',[])
+                        update(progress={'phase':'collecting','checks':len(records),'last_check':records[-1].get('check','') if records else '', 'unavailable':report.get('unavailable',0)})
                     update(evidence=json.dumps(connectors.redact_structure(report),ensure_ascii=False))
-                live_report=collect_pod(cfg,body.namespace,body.pod,resolved_context.get('uid',''),cached,progress)
+                options={'scenario':body.scenario} if body.scenario else {}
+                live_report=collect_pod(cfg,body.namespace,body.pod,resolved_context.get('uid',''),cached,progress,**options)
                 from .diagnostics import verified_summary
                 update(answer=verified_summary(live_report,body.mode),evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False))
                 if not resolved_context.get('uid') and live_report.get('pod',{}).get('uid'):
@@ -760,6 +803,29 @@ def create_app(runtime=None, polling=True):
                 context=json.dumps(connectors.redact_structure(model_evidence(live_report)),ensure_ascii=False)
             else:
                 context=evidence
+            if body.scenario:
+                from . import workflows
+                if not live_report:
+                    from .resource_diagnostics import collect_resource
+                    from .diagnostics import model_evidence
+                    def resource_progress(report):
+                        nonlocal live_report
+                        live_report=report
+                        sessions.get(body.session_id)
+                        check_scenario_sources()
+                        records=report.get('records',[])
+                        update(evidence=json.dumps(connectors.redact_structure(report),ensure_ascii=False),progress={'phase':'collecting','checks':len(records),'last_check':records[-1].get('check','') if records else ''})
+                    live_report=collect_resource(cfg,resolved_context,snap,resource_progress,scenario=body.scenario)
+                    evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False)
+                    context=json.dumps(connectors.redact_structure(model_evidence(live_report)),ensure_ascii=False)
+                    update(evidence=evidence)
+                    trace.extend({'tool':r['id']+' '+r['check'],'status':r['status']} for r in live_report.get('records',[]))
+                check_scenario_sources()
+                update(scenario_result=workflows.build_result(body.scenario,live_report,context=resolved_context),progress={'phase':'analyzing','checks':len(live_report.get('records',[]))})
+                if body.scenario=='recovery':
+                    check_scenario_sources()
+                    update(status='done',progress={'phase':'complete','checks':len(live_report.get('records',[]))},trace=json.dumps(trace,ensure_ascii=False),evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False))
+                    return
             selected_skills=select_runbooks({'context':resolved_context,'pod':live_report.get('pod',{}),'findings':live_report.get('findings',[])},body.question)
             trace.append({'tool':'policy:'+POLICY_ID,'status':'applied','version':POLICY_VERSION})
             trace.extend({'tool':'skill:'+r['id'],'status':'selected','version':r['version']} for r in selected_skills)
@@ -779,7 +845,7 @@ def create_app(runtime=None, polling=True):
             incidents=connectors.redact_structure([{'question':r['question'][:1500],'solution':r['solution'][:3000]} for r in incidents])
             safe_question=connectors.redact_sensitive_text(body.question)
             messages = [
-                {'role':'system','content':build_system_prompt(body.mode,body.chat,selected_skills)},
+                {'role':'system','content':build_system_prompt(body.mode,body.chat,selected_skills,response_contract=workflows.model_prompt(body.scenario) if body.scenario else None)},
                 {'role':'user','content':f'Контекст проблемы: {json.dumps(connectors.redact_structure(resolved_context),ensure_ascii=False)}\nВопрос оператора: {safe_question}\nКластер: {body.cluster_id}\nДоказательства и выполненные проверки: {context}\nСтатус поиска документации: {vector_note}. Лексический поиск и векторный поиск — разные проверки.\nДокументы: {json.dumps(docs,ensure_ascii=False)}\nПодтверждённые решения: {json.dumps(incidents,ensure_ascii=False)}'}]
             if body.chat:
                 summary=facts.get('resources',{}).get('pods',{})
@@ -804,6 +870,9 @@ def create_app(runtime=None, polling=True):
                 trace.append({'tool':'engine','status':'Astra AI / SSE'})
                 update(trace=json.dumps(trace,ensure_ascii=False))
                 def partial(text):
+                    if body.scenario:
+                        update(answer=connectors.redact_sensitive_text(text))
+                        return
                     prefix=(verified_summary(live_report,body.mode)+'\n\n## Анализ модели по доказательствам\n') if live_report else ''
                     update(answer=prefix+text)
                 answer=astra_chat(cfg['astra_ai'],messages,partial)
@@ -813,6 +882,13 @@ def create_app(runtime=None, polling=True):
             else:
                 answer=connectors.llm_chat(llm,messages)
                 trace.append({'tool':'engine','status':'local LLM'})
+            if body.scenario:
+                check_scenario_sources()
+                result=workflows.build_result(body.scenario,live_report,model_answer=answer,context=resolved_context)
+                check_scenario_sources()
+                valid=result['model']['status']=='complete'
+                update(scenario_result=connectors.redact_structure(result),answer=connectors.redact_sensitive_text(answer),status='done' if valid else 'failed',error=result['model'].get('error',''),trace=json.dumps(connectors.redact_structure(trace),ensure_ascii=False),progress={'phase':'complete' if valid else 'error','checks':len(live_report.get('records',[]))})
+                return
             if live_report:
                 from .diagnostics import verified_summary,review_answer
                 warnings=review_answer(live_report,answer)
@@ -827,7 +903,28 @@ def create_app(runtime=None, polling=True):
             if body.session_id:
                 try:sessions.get(body.session_id)
                 except SessionGone:return
+            if body.scenario:
+                try:check_scenario_sources()
+                except ScenarioSourcesChanged as changed:exc=changed
             error=str(exc) if isinstance(exc,connectors.ConnectorError) else 'Не удалось завершить анализ. Проверьте модель, лимиты и источники.'
+            if body.scenario:
+                from . import workflows
+                if isinstance(exc,ScenarioSourcesChanged):
+                    live_report['stale_sources']=True
+                    live_report['complete']=False
+                try:
+                    result=workflows.build_result(body.scenario,live_report,model_error=error,context=resolved_context)
+                except Exception:
+                    # A malformed source or a formatter failure must not leave
+                    # a volatile job running forever or discard its journal.
+                    result={'id':body.scenario,'title':workflows.scenario(body.scenario)['title'],
+                            'status':'unconfirmed','origin':'pulse',
+                            'summary':'Не удалось сформировать разбор. Собранные проверки сохранены в источниках.',
+                            'rows':[],'sections':[],'steps':[],'limitations':[],
+                            'recovery':{'state':'unconfirmed','checks':[]},
+                            'model':{'status':'unavailable','error':error},'observed_at':now()}
+                update(scenario_result=connectors.redact_structure(result),status='failed',error=connectors.redact_sensitive_text(error),evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False),trace=json.dumps(connectors.redact_structure(locals().get('trace',[])+[{'tool':'analysis','status':'failed'}]),ensure_ascii=False),progress={'phase':'error','checks':len(live_report.get('records',[]))})
+                return
             from .astra_ai import IncompleteAnswer
             if live_report:
                 from .diagnostics import verified_summary
@@ -841,7 +938,7 @@ def create_app(runtime=None, polling=True):
 
     @api.post('/investigations', status_code=202)
     def create_investigation(body: Investigate):
-        if body.session_id or body.chat:raise HTTPException(422,'Используйте API временного диалога')
+        if body.session_id or body.chat or body.scenario:raise HTTPException(422,'Используйте API временного диалога')
         item = cluster(body.cluster_id)
         if body.previous_id:
             previous = get_investigation(body.previous_id)
@@ -907,6 +1004,76 @@ def create_app(runtime=None, polling=True):
         try:return sessions.job(sid,jid)
         except SessionGone:raise HTTPException(404,'Ответ недоступен')
 
+    @api.get('/scenarios')
+    def scenario_catalog():
+        from .workflows import catalog
+        return catalog()
+
+    class ScenarioRequest(BaseModel):
+        model_config = {'extra':'forbid'}
+        scenario: str = Field(pattern='^(brief|deep|causes|impact|plan|recovery)$')
+        problem_id: Optional[str] = Field(default=None,min_length=1,max_length=64)
+        namespace: Optional[str] = Field(default=None,min_length=1,max_length=63,pattern='^[a-z0-9]([a-z0-9-]*[a-z0-9])?$')
+        pod: Optional[str] = Field(default=None,min_length=1,max_length=253,pattern='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
+        uid: Optional[str] = Field(default=None,min_length=1,max_length=128,pattern='^[a-zA-Z0-9_-]+$')
+        metric: Optional[str] = Field(default=None,pattern='^(cpu|ram|disk)$')
+
+    @api.post('/sessions/{sid}/scenarios',status_code=202)
+    def session_scenario(sid: str, request_body: ScenarioRequest):
+        from .workflows import scenario
+        current=session(sid);cid=current['cluster_id']
+        if current['mode']!='problem' or not cid:raise HTTPException(422,'Сценарий требует выбранного кластера')
+        cfg=dict(cluster(cid)['config'])
+        llm=db().settings().get('llm',{})
+        source_stamp=scenario_source_stamp(cfg,llm)
+        bound=current.get('scenario_target')
+        if bound and current.get('scenario_generation')!=source_stamp:
+            raise HTTPException(409,'Подключение изменилось. Откройте диагностику заново.')
+        if request_body.metric and (request_body.problem_id or request_body.namespace or request_body.pod or request_body.uid):
+            raise HTTPException(422,'Выберите один объект диагностики')
+        resolved=None
+        if request_body.problem_id:
+            if bound and bound.get('id')==request_body.problem_id:
+                resolved=bound
+            else:
+                resolved=next((i for i in problem_items(cid)[0] if i['id']==request_body.problem_id),None)
+            if resolved is None:raise HTTPException(409,'Сигнал изменился или принадлежит другому кластеру. Обновите Обзор.')
+            for supplied,key in ((request_body.namespace,'namespace'),(request_body.pod,'name'),(request_body.uid,'uid')):
+                if supplied is not None and supplied!=resolved.get(key):raise HTTPException(409,'UID или объект не соответствует выбранной проблеме')
+        elif request_body.metric:
+            resolved={'metric':request_body.metric,'cluster_id':cid,'title':'Утилизация '+request_body.metric}
+        elif request_body.namespace or request_body.pod or request_body.uid:
+            if not (request_body.namespace and request_body.pod and request_body.uid):
+                raise HTTPException(422,'Укажите namespace, имя и UID Pod')
+            # Validate DNS labels as well as the whole subdomain. Reject path-like
+            # input before it can reach a Kubernetes connector.
+            if not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',part) for part in request_body.pod.split('.')):
+                raise HTTPException(422,'Некорректное имя Pod')
+            cached=next((p for p in snapshot(cid).get('resources',{}).get('pods',{}).get('items',[]) if p.get('metadata',{}).get('namespace')==request_body.namespace and p.get('metadata',{}).get('name')==request_body.pod),None)
+            if cached and cached.get('metadata',{}).get('uid')!=request_body.uid:
+                raise HTTPException(409,'UID Pod изменился. Выберите объект заново.')
+            resolved={'kind':'pods','cluster_id':cid,'namespace':request_body.namespace,'name':request_body.pod,'uid':request_body.uid}
+        elif bound:
+            resolved=bound
+        if not resolved:raise HTTPException(422,'Выберите объект диагностики')
+        try:resolved=sessions.bind_scenario(sid,resolved,source_stamp)
+        except (ValueError,SessionGone) as exc:raise HTTPException(409,str(exc) or 'Диагностика закрыта')
+        if current['engine']=='local':
+            cfg.pop('astra_ai',None);cfg.pop('holmes',None)
+        metadata=scenario(request_body.scenario)
+        body=Investigate(cluster_id=cid,session_id=sid,question=metadata['question'],mode=metadata['mode'],scenario=request_body.scenario,problem_id=request_body.problem_id,metric=resolved.get('metric'),namespace=resolved.get('namespace') or None,pod=resolved.get('name') if resolved.get('kind')=='pods' else None)
+        if not slots.acquire(blocking=False):raise HTTPException(429,'Очередь заполнена')
+        jid=uuid.uuid4().hex
+        try:
+            job=dict(id=jid,cluster_id=cid,scenario=body.scenario,question=body.question,status='queued',answer='',error='',created_at=now(),previous_id='',context=json.dumps(connectors.redact_structure(resolved),ensure_ascii=False),trace='[]',evidence='{}',scenario_result=None,progress={'phase':'queued','checks':0})
+            sessions.add(sid,job)
+            pool.submit(investigate,jid,body,cfg,llm,resolved,source_stamp)
+        except (ValueError,SessionGone) as exc:
+            slots.release();raise HTTPException(409,str(exc) or 'Диагностика закрыта')
+        except Exception:
+            slots.release();raise
+        return {'id':jid,'status':'queued'}
+
     class SessionMessage(BaseModel):
         question: str = Field(min_length=3,max_length=4000)
         problem_id: Optional[str] = Field(default=None,max_length=64)
@@ -916,6 +1083,8 @@ def create_app(runtime=None, polling=True):
     @api.post('/sessions/{sid}/messages',status_code=202)
     def session_message(sid: str, request_body: SessionMessage):
         current=session(sid);cid=current['cluster_id']
+        if current.get('scenario_target'):
+            raise HTTPException(409,'Эта сессия предназначена для сценариев. Откройте новый диалог.')
         cfg=dict(cluster(cid)['config']) if cid else {}
         if current['engine']=='local':
             cfg.pop('astra_ai',None);cfg.pop('holmes',None)

@@ -4,7 +4,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {page: 'overview', cluster: '', clusters: [], snapshot: null, overview: [], editingCluster: null, logs: null, resolving: null, previousId: null, loadSequence: 0, pollBusy: false};
 try { state.cluster = localStorage.getItem('pulse.cluster') || ''; } catch (_) { /* Storage can be unavailable in private browser contexts. */ }
-const titles = {overview: 'Обзор кластеров', resources: 'Ресурсы Kubernetes', investigations: 'Расследования', knowledge: 'База знаний', settings: 'Настройки', chat:'Чат с ИИ'};
+const titles = {overview: 'Обзор кластеров', resources: 'Ресурсы Kubernetes', diagnostics: 'Диагностика проблемы', investigations: 'Архив расследований', knowledge: 'База знаний', settings: 'Настройки', chat:'Чат с ИИ'};
 const typeNames = {pods: 'Pods', nodes: 'Nodes', namespaces: 'Namespaces'};
 
 function node(tag, className, text) {
@@ -63,6 +63,7 @@ function requireCluster() {
 function clusterPath(suffix = '') { return `/clusters/${encodeURIComponent(requireCluster())}${suffix}`; }
 function currentClusterName() { return state.clusters.find(item => item.id === state.cluster)?.name || state.cluster; }
 function setCluster(id) {
+  if (state.cluster !== id && typeof clearScenarioContext === 'function') clearScenarioContext();
   state.cluster = id; state.snapshot = null; clearFollowup();
   try { localStorage.setItem('pulse.cluster', id); } catch (_) { /* Optional preference only. */ }
   $('#cluster-select').value = id;
@@ -78,6 +79,7 @@ async function loadClusters() {
 async function navigate() {
   const page = location.hash.slice(1) || 'overview',nextPage=Object.hasOwn(titles,page)?page:'overview';
   if(state.page!==nextPage&&$('#ai-dialog').open)$('#ai-dialog').close();
+  if(state.page==='diagnostics'&&nextPage!=='diagnostics'&&typeof clearScenarioContext==='function')clearScenarioContext();
   state.page = nextPage;
   $$('.page').forEach(item => item.classList.toggle('hidden', item.id !== `page-${state.page}`));
   $$('#navigation a').forEach(item => { const active = item.dataset.page === state.page; item.classList.toggle('active', active); if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
@@ -90,6 +92,7 @@ async function loadPage() {
   try {
     if (state.page === 'overview') await loadOverview();
     else if (state.page === 'resources') await loadResources();
+    else if (state.page === 'diagnostics') await loadDiagnostics();
     else if (state.page === 'investigations') await loadInvestigations();
     else if (state.page === 'knowledge') await loadKnowledge();
     else if (state.page === 'settings') await loadSettings();
@@ -164,11 +167,11 @@ async function openMetricDetail(metric){const cid=selectedMetricCluster();if(!ci
  const load=async()=>{loading(target);try{const data=await api(`/clusters/${encodeURIComponent(cid)}/metrics-detail?metric=${metric}&window=${range.value}`);clear(target);target.append(controls);const holder=node('div','detail-metric-chart');renderDashboardMetrics(holder,{...data.summary,metrics:{[metric]:data.summary.metrics?.[metric]}},false);holder.querySelectorAll('.utilization-card').forEach(card=>{if(!card.dataset.metric||card.dataset.metric===metric)return;card.remove();});target.append(holder);target.append(node('h3','','Детализация по узлам и workloads'));
  for(const [name,payload] of Object.entries(data.series||{})){const section=node('section','series-section');section.append(node('h3','',`${name} · ${data.units?.[name]||''}`));if(payload.error)notice(section,payload.error,'warning');const rows=payload.data?.result||[];if(!rows.length)notice(section,'Серий нет: проверьте exporter и labels.');const table=node('table');table.append(append(node('thead'),append(node('tr'),node('th','','Метки источника'),node('th','','Значение'),node('th','','Время'))));const body=node('tbody');for(const row of rows.slice(0,500))body.append(append(node('tr'),node('td','',Object.entries(row.metric||{}).filter(([k])=>k!=='__name__').map(([k,v])=>`${k}=${v}`).join(' · ')),node('td','',metricValue(row.value?.[1],data.units?.[name])),node('td','',row.value?date(row.value[0]*1000):'—')));table.append(body);section.append(append(node('div','table-wrap'),table));if(rows.length>500)notice(section,'Показаны первые 500 серий. Уточните scope источника.','warning');target.append(section);}
  }catch(e){notice(clear(target),errorText(e),'error');}};
- controls.append(range,seriesSearch,button('✧ Спросить ИИ',()=>openAnalysis({cluster_id:cid,metric,title:`Утилизация ${metric.toUpperCase()}`})));range.addEventListener('change',load);await load();}
+ controls.append(range,seriesSearch,button('✧ Диагностика',()=>openAnalysis({cluster_id:cid,metric,title:`Утилизация ${metric.toUpperCase()}`})));range.addEventListener('change',load);await load();}
 async function loadProblemTable(board){const request=++problemRequest;const list=$('.problem-table-body',board),count=$('.problem-count',board),pager=$('.problem-pager',board);if(!list)return;
  const params=new URLSearchParams({cluster_id:state.cluster,severity:problemSeverity,q:problemQuery,offset:problemOffset,limit:25});
  try{const result=await api('/problems?'+params);if(!board.isConnected||request!==problemRequest)return;clear(list);count.textContent=`${result.total}`;
- for(const item of result.items){const tr=node('tr',`problem-${item.severity}${item.stale?' historical':''}`);const ai=button('✧',()=>openAnalysis(item),'secondary ai-spark');ai.setAttribute('aria-label',`Анализ ИИ: ${item.name}`);ai.title='Разобрать с ИИ';tr.append(append(node('td'),ai),append(node('td'),node('span',`severity-dot ${item.severity}`),node('span','',item.severity==='critical'?'Критично':'Внимание')),append(node('td'),Object.assign(node('strong','',item.phase==='Failed'?`${item.reason||'Failed'} · завершённый Pod`:item.title),{title:item.title}),Object.assign(node('small','metadata',item.detail),{title:item.detail})),append(node('td'),button(item.name,()=>openResourceDetail(item.kind,item.name,item.cluster_id,item.namespace),'secondary small')),node('td','',`${item.cluster_name} / ${item.namespace||item.kind}`),node('td','',item.stale?'Старый снимок':date(item.observed_at)));list.append(tr);}
+ for(const item of result.items){const tr=node('tr',`problem-${item.severity}${item.stale?' historical':''}`);const ai=button('✧',()=>openAnalysis(item),'secondary ai-spark');ai.setAttribute('aria-label',`Диагностика: ${item.name}`);ai.title='Открыть диагностику';tr.append(append(node('td'),ai),append(node('td'),node('span',`severity-dot ${item.severity}`),node('span','',item.severity==='critical'?'Критично':'Внимание')),append(node('td'),Object.assign(node('strong','',item.phase==='Failed'?`${item.reason||'Failed'} · завершённый Pod`:item.title),{title:item.title}),Object.assign(node('small','metadata',item.detail),{title:item.detail})),append(node('td'),button(item.name,()=>openResourceDetail(item.kind,item.name,item.cluster_id,item.namespace),'secondary small')),node('td','',`${item.cluster_name} / ${item.namespace||item.kind}`),node('td','',item.stale?'Старый снимок':date(item.observed_at)));list.append(tr);}
  if(!result.items.length)list.append(append(node('tr'),Object.assign(node('td','muted','Сигналов по выбранному фильтру нет'),{colSpan:6})));
  clear(pager);const prev=button('←',()=>{problemOffset=Math.max(0,problemOffset-25);loadProblemTable(board);});prev.disabled=problemOffset===0;const next=button('→',()=>{problemOffset+=25;loadProblemTable(board);});next.disabled=problemOffset+25>=result.total;pager.append(node('span','muted',`${result.total?problemOffset+1:0}–${Math.min(problemOffset+25,result.total)} из ${result.total}`),prev,next);const coverage=$('.problem-coverage',board);coverage.textContent=result.coverage.some(c=>c.incomplete||c.stale||!c.enabled)?'Есть неполные / устаревшие источники':'По доступным Kubernetes-наблюдениям';
  }catch(e){clear(list).append(append(node('tr'),Object.assign(node('td','critical-text',errorText(e)),{colSpan:6})));}}
@@ -270,7 +273,7 @@ function renderResources() {
     const row = node('tr'); row.append(node('td', 'resource-name', item.metadata?.name || '—'), node('td', '', item.metadata?.namespace || '—'), node('td', '', resourceStatus(item, type)));
     const actions = node('div', 'table-actions');
     actions.append(button('JSON', () => { $('#object-title').textContent = item.metadata?.name || type; $('#object-json').textContent = JSON.stringify(item, null, 2); $('#object-dialog').showModal(); }));
-    if (type === 'pods') actions.append(button('Логи', () => openLogs(item)), button('Почему?', () => { clearFollowup(); const form = $('#investigation-form'); form.elements.namespace.value = item.metadata?.namespace || ''; form.elements.pod.value = item.metadata?.name || ''; form.elements.question.value = `Объясни состояние Pod ${item.metadata?.name || ''}. Какие факты указывают на проблему и что проверить?`; location.hash = 'investigations'; }));
+    if (type === 'pods') actions.append(button('Логи', () => openLogs(item)), button('Диагностика', () => openAnalysis({cluster_id:state.cluster,cluster_name:currentClusterName(),namespace:item.metadata?.namespace||'',name:item.metadata?.name||'',uid:item.metadata?.uid||'',kind:'pods',title:resourceStatus(item,type)})));
     row.append(append(node('td'), actions)); tbody.append(row);
   }); table.append(tbody); target.append(append(node('div', 'table-wrap'), table));
 }
@@ -307,7 +310,7 @@ async function loadInvestigations() {
   if (!state.cluster) { target.append(empty('Выберите кластер', 'Контекст расследования ограничивается выбранным кластером.')); return; }
   const selected = state.cluster, data = await api(`/investigations?cluster_id=${encodeURIComponent(selected)}`);
   if (state.cluster !== selected) return;
-  if (!(data.items || []).length) { target.append(empty('Расследований пока нет', 'Задайте вопрос о состоянии инфраструктуры или откройте анализ из карточки Pod.')); return; }
+  if (!(data.items || []).length) { target.append(empty('Архив пуст', 'Новые проверки доступны в разделе «Диагностика».', button('Открыть диагностику',()=>{location.hash='diagnostics';}))); return; }
   (data.items || []).forEach(item => {
     const card = node('article', 'item-card'); card.dataset.testid = 'investigation'; card.dataset.status = item.status;
     card.append(append(node('div', 'section-heading'), node('h3', '', item.question), statusChip(item.status)));
@@ -315,7 +318,7 @@ async function loadInvestigations() {
     if (item.answer) card.append(node('div', 'answer', item.answer));
     if (item.error) notice(card, item.error, 'error');
     if (['queued', 'pending', 'running'].includes(item.status)) card.append(node('p', 'muted', 'Задание сохранено. Можно закрыть страницу — результат останется в истории.'));
-    if (item.answer) { card.append(button('Продолжить обсуждение', () => { state.previousId = item.id; const context = $('#followup-context'); $('span', context).textContent = `Продолжение: ${item.question}`; context.classList.remove('hidden'); const form = $('#investigation-form'); form.elements.namespace.value = item.namespace || ''; form.elements.pod.value = item.pod || ''; form.elements.question.value = ''; form.elements.question.focus(); form.scrollIntoView({behavior: 'smooth', block: 'start'}); })); const action = button('Записать проверенное решение', () => { state.resolving = item.id; $('#resolve-form').reset(); message($('#resolve-form'), ''); $('#resolve-dialog').showModal(); }); action.style.marginTop = '16px'; card.append(action); }
+    if (item.answer) { const action = button('Записать проверенное решение', () => { state.resolving = item.id; $('#resolve-form').reset(); message($('#resolve-form'), ''); $('#resolve-dialog').showModal(); }); action.style.marginTop = '16px'; card.append(action); }
     target.append(card);
   });
 }
@@ -551,6 +554,7 @@ function forgetAnalysis(){
  if(sid)fetch(`/api/sessions/${encodeURIComponent(sid)}`,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});
 }
 async function openAnalysis(context){
+ if(!context.chat)return openScenario(context);
  forgetAnalysis();const sequence=++analysisSequence;
  analysisState={context,session:null,previous:null,jobs:[]};
  const engine=context.engine||(context.chat?$('#chat-engine').value:'cluster');$('#analysis-engine').value=engine;
@@ -592,7 +596,7 @@ $('#analysis-engine-test').addEventListener('click',event=>busy(event.currentTar
 // A delayed close event from an old dialog must not erase a newly opened one.
 $('#ai-dialog').addEventListener('close',()=>{if(!$('#ai-dialog').open)forgetAnalysis();});
 window.addEventListener('pagehide',forgetAnalysis);
-$('#navigation a[data-page=chat]').addEventListener('click',event=>{
+$('#navigation a[data-page=chat]')?.addEventListener('click',event=>{
  if(state.page==='chat'){event.preventDefault();openAnalysis({cluster_id:state.cluster,chat:true});}
 });
 $('#new-chat').addEventListener('click',()=>openAnalysis({cluster_id:state.cluster,chat:true}));

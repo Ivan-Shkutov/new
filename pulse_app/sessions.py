@@ -43,9 +43,29 @@ class Sessions:
             session = self.get(sid)
             if any(j['status'] in ('queued', 'running') for j in session['jobs'].values()):
                 raise ValueError('Дождитесь предыдущего ответа.')
-            if len(session['jobs']) >= 20:
+            if session.get('scenario_target'):
+                # Fixed actions never use earlier answers as history. Keep only
+                # a small polling window, so repeated checks do not hit a chat
+                # transcript limit or retain an ever-growing evidence journal.
+                for key in list(self.items[sid]['jobs'])[:-2]:
+                    del self.items[sid]['jobs'][key]
+            elif len(session['jobs']) >= 20:
                 raise ValueError('Достигнут лимит 20 сообщений. Начните новый диалог.')
             self.items[sid]['jobs'][job['id']] = job
+
+    def bind_scenario(self, sid, target, generation):
+        """Bind a volatile diagnostic session to one immutable object identity."""
+        with self.lock:
+            session = self.get(sid)
+            previous = session.get('scenario_target')
+            def identity(value):
+                return tuple(value.get(k, '') for k in ('cluster_id', 'kind', 'namespace', 'name', 'uid', 'metric'))
+            if previous is not None and (identity(previous) != identity(target) or session.get('scenario_generation') != generation):
+                raise ValueError('Объект или подключение изменилось. Откройте диагностику заново.')
+            if previous is None:
+                self.items[sid]['scenario_target'] = copy.deepcopy(target)
+                self.items[sid]['scenario_generation'] = generation
+            return copy.deepcopy(self.items[sid]['scenario_target'])
 
     def update(self, sid, jid, fields):
         with self.lock:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compact overview/drilldown/chat browser checks, with clearly identified fixtures."""
+"""Compact overview/drilldown/scenario browser checks with explicit API fixtures."""
 import argparse
 import hashlib
 import json
@@ -20,13 +20,14 @@ def main():
     parser.add_argument('--password-file',type=Path,required=True)
     parser.add_argument('--screenshots',type=Path,default=Path('/tmp/pulse-compact'))
     args=parser.parse_args();args.screenshots.mkdir(parents=True,exist_ok=True)
-    data=fixture.payload('overview');data['version']='0.14.0'
+    data=fixture.payload('overview');data['version']='0.15.0'
     issues=[]
     for i in range(80):
         row=dict(data['issues'][i%len(data['issues'])]);row['name']+=f'-{i:02d}'
         row['id']=hashlib.sha256(str(i).encode()).hexdigest()[:32];issues.append(row)
     all_issues=issues;issues=all_issues[:1]
     jobs=[];errors=[];last_request=[];broken=[False]
+    scenarios=[('brief','Краткий разбор'),('deep','Подробный разбор'),('causes','Причины сбоя'),('impact','Последствия сбоя'),('plan','План устранения'),('recovery','Проверка восстановления')]
     def problem_route(route):
         q=parse_qs(urlparse(route.request.url).query);rows=issues
         if q.get('q'):rows=[i for i in rows if q['q'][0].lower() in json.dumps(i).lower()]
@@ -35,15 +36,40 @@ def main():
     def job_route(route):
         if route.request.method=='POST':
             body=route.request.post_data_json;last_request.append(body)
-            if not jobs:assert body['problem_id']==issues[0]['id']
-            job={'id':f'job-{len(jobs)}','cluster_id':'peoplehub','question':body['question'],'status':'done','answer':'## Вывод\nПричина пока не установлена.\n- Источник: condition Ready=False.\n<script>alert(1)</script>\n| Проверка | Результат |\n| --- | --- |\n| UID | Тестовые данные |\n## Проверка\nСверьте логи kubelet.','context':json.dumps(issues[0]),'evidence':json.dumps({'records':[{'id':'E01','check':'Pod status (fixture)','status':'ok','method':'GET','path':'/api/v1/namespaces/application/pods/test','equivalent_command':'kubectl -n application get pod test -o json','data':{'reason':'Evicted'}}],'unavailable':0}),'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
-            job['answer']='## Проверенные данные Pulse\nСлужебная сводка доказательств [E01].\n\n## Анализ модели по доказательствам\n'+job['answer'].replace('Причина пока не установлена.','**Причина** пока не установлена.').replace('Тестовые данные','`Тестовые данные`')+'\n\n1. Первая проверка\n   - Уточнение проверки\n\n2. Вторая проверка'
+            assert body['problem_id']==issues[0]['id']
+            assert body['scenario'] in dict(scenarios)
+            assert not {'question','prompt','previous_id'} & body.keys()
+            result={'id':body['scenario'],'title':dict(scenarios)[body['scenario']],
+                    'status':'partial','origin':'pulse','summary':'Причина пока не установлена. <script>alert(1)</script>',
+                    'rows':[{'label':'Объект','value':'Тестовые данные','evidence_ids':['E01']}],
+                    'sections':[],'steps':[],'limitations':[],
+                    'recovery':{'state':'unconfirmed','checks':[]},
+                    'model':{'status':'not_used' if body['scenario']=='recovery' else 'complete','error':''},
+                    'observed_at':'2026-11-02T13:45:50Z'}
+            if body['scenario']=='plan':
+                result['steps']=[{'title':'Проверить исходный Pod','detail':'Сверьте status.message и UID.',
+                                  'evidence_ids':['E01'],'commands':[{'command':'kubectl -n application get pod test -o json',
+                                  'purpose':'Прочитать статус выбранного Pod','expected':'UID и причина совпадают с выбранным объектом.',
+                                  'scope':'application / test'}]}]
+            job={'id':f'job-{len(last_request)}','cluster_id':'peoplehub','scenario':body['scenario'],
+                 'status':'done','answer':'Неиспользуемый сырой ответ модели.',
+                 'scenario_result':result,'context':json.dumps(issues[0]),
+                 'evidence':json.dumps({'records':[{'id':'E01','check':'Pod status (fixture)','status':'ok',
+                    'complete':True,'method':'GET','path':'/api/v1/namespaces/application/pods/test',
+                    'equivalent_command':'kubectl -n application get pod test -o json','data':{'reason':'Evicted'}}],
+                    'unavailable':0}),
+                 'trace':json.dumps([{'tool':'skill:nodes','status':'selected'},{'tool':'snapshot','status':'ok'}])}
             if broken[0]:
-                job.update(status='failed',error='Обрыв или ошибка сети/TLS при чтении Astra AI; ответ не считается завершённым',answer='## Проверенные данные Pulse\nПодтверждено превышение EmptyDir [E01].\n\n## Незавершённый ответ модели\nOOM исключён по коду 137.\nkubectl get deployment unfinished')
+                error='Local model HTTP 503 (fixture)'
+                job.update(status='failed',error=error,answer='OOM исключён по коду 137.\nkubectl get deployment unfinished')
+                result.update(summary='Подтверждено: превышен лимит EmptyDir data — 1Gi.',
+                              model={'status':'unavailable','error':error})
+                result['rows']=[{'label':'Причина','value':'Превышен лимит временного тома; заполнение диска узла не доказано.','evidence_ids':['E01']}]
                 report=json.loads(job['evidence']);report['pod']={'phase':'Failed','reason':'Evicted','message':'Usage of EmptyDir volume "data" exceeds the limit "1Gi".','source_type':'cached'};report['findings']=[{'source':'E01','fact':'Pod phase=Failed; reason=Evicted.'}];job['evidence']=json.dumps(report)
             jobs.append(job);route.fulfill(status=202,json={'id':job['id'],'status':'queued'})
-        elif '/investigations?' in route.request.url:route.fulfill(json={'items':jobs[::-1]})
-        else:route.fulfill(json=jobs[-1])
+        else:
+            jid=urlparse(route.request.url).path.rsplit('/',1)[-1]
+            route.fulfill(json=next(job for job in jobs if job['id']==jid))
     def metrics(route):
         now=time.time();result={'configured':True,'window':'1h','start':now-3600,'end':now,'step':30,'note':'Тестовые данные, не состояние сервера пользователя','metrics':{}}
         for k,n in [('cpu',38),('ram',64),('disk',72)]:result['metrics'][k]={'percent':n,'observed_at':now,'history':[[now-3600+i*30,n+(i%7)-3] for i in range(121)],'nodes':[{'instance':f'10.128.73.{i+5}:9100','percent':(94 if k=='disk' and i==2 else n+i),'observed_at':now} for i in range(6)]}
@@ -57,8 +83,8 @@ def main():
         page.route('**/api/clusters',lambda r:r.fulfill(json={'items':[{'id':'peoplehub','name':'PeopleHub (тест)','enabled':True}]}))
         page.route('**/api/dashboard*',lambda r:r.fulfill(json=data))
         page.route('**/api/problems?*',problem_route)
-        page.route('**/api/investigations**',job_route)
-        page.route('**/api/investigations/*',job_route)
+        page.route('**/api/investigations**',lambda r:r.fulfill(json={'items':[]}))
+        page.route('**/api/scenarios',lambda r:r.fulfill(json={'items':[{'id':sid,'title':title,'description':'Тестовый сценарий'} for sid,title in scenarios]}))
         closed=[]
         def sessions_route(route):
             if route.request.method=='POST':
@@ -66,7 +92,7 @@ def main():
             else:closed.append(route.request.url);route.fulfill(json={'ok':True})
         page.route('**/api/sessions',sessions_route)
         page.route('**/api/sessions/*',sessions_route)
-        page.route('**/api/sessions/*/messages',job_route)
+        page.route('**/api/sessions/*/scenarios',job_route)
         page.route('**/api/sessions/*/jobs/*',job_route)
         page.route('**/api/clusters/*/dashboard-metrics?*',metrics)
         page.route('**/api/clusters/*/metrics-detail?*',metrics)
@@ -111,61 +137,83 @@ def main():
         page.screenshot(path=str(args.screenshots/'cpu-detail.png'),full_page=True)
         page.get_by_role('button',name='Закрыть dashboard',exact=True).click()
         page.locator('.problem-table-body .ai-spark').first.click()
-        page.locator('#ai-dialog').wait_for(state='visible')
-        page.locator('#ai-form textarea').fill('В чём причина?');page.locator('#ai-form button[type=submit]').click()
-        try:page.locator('.chat-answer').first.wait_for(timeout=5000)
+        page.locator('#page-diagnostics').wait_for(state='visible')
+        try:page.locator('.scenario-summary').wait_for(timeout=5000)
         except Exception:
-            print('Chat test failed:',page.locator('#ai-status').inner_text(),errors)
-            page.screenshot(path='/tmp/pulse-chat-failure.png',full_page=True)
+            print('Scenario test failed:',page.locator('#scenario-status').inner_text(),errors)
+            page.screenshot(path='/tmp/pulse-scenario-failure.png',full_page=True)
             raise
-        assert page.locator('#ai-conversation script').count()==0
-        assert '<script>alert(1)</script>' in page.locator('.chat-answer').inner_text()
-        assert 'Служебная сводка' not in page.locator('.chat-answer').inner_text()
-        expect(page.locator('.chat-answer strong')).to_have_text('Причина')
-        expect(page.locator('.analysis-table code')).to_have_text('Тестовые данные')
-        assert page.locator('.chat-answer ol>li>ul').count()==1
-        assert page.locator('.chat-answer>ol').count()==1
-        assert not page.locator('.analysis-sources').evaluate('(e)=>e.open')
-        page.locator('#ai-conversation').evaluate('(e)=>e.scrollTop=0')
+        expect(page.locator('#scenario-buttons [data-scenario]')).to_have_count(6)
+        assert page.locator('#page-diagnostics textarea').count()==0
+        assert page.locator('#scenario-result-body script').count()==0
+        assert '<script>alert(1)</script>' in page.locator('.scenario-summary').inner_text()
+        assert 'Неиспользуемый сырой ответ' not in page.locator('#scenario-result-body').inner_text()
+        expect(page.locator('.scenario-answer-table')).to_contain_text('Тестовые данные')
+        assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
+        assert last_request[-1]['scenario']=='brief'
         page.screenshot(path=str(args.screenshots/'analysis-brief.png'),full_page=True)
-        page.locator('.analysis-sources>summary').click()
-        expect(page.locator('.analysis-facts')).to_be_visible()
-        page.locator('#ai-form textarea').fill('Что проверить дальше?');page.locator('#ai-form button[type=submit]').click()
-        expect(page.locator('.chat-answer')).to_have_count(2)
-        assert page.locator('.analysis-sources').first.evaluate('(e)=>e.open')
-        assert len(last_request)==2
-        page.get_by_role('button',name='Нужные команды',exact=True).click()
-        expect(page.locator('.chat-answer')).to_have_count(3)
-        assert last_request[-1]['mode']=='commands'
-        assert page.locator('.evidence-journal').count()==3
-        assert page.locator('.analysis-table').count()==3
+        page.locator('#scenario-sources>summary').click()
+        page.locator('#scenario-evidence-E01>summary').click()
+        expect(page.locator('#scenario-evidence-E01')).to_contain_text('kubectl -n application get pod test -o json')
+        for scenario,_ in scenarios[1:]:
+            page.locator(f'#scenario-buttons [data-scenario={scenario}]').click()
+            expect(page.locator('.scenario-summary')).to_have_count(1)
+            expect(page.locator('#scenario-result')).to_have_attribute('aria-busy','false')
+            expect(page.locator('#scenario-result-body')).to_have_attribute('data-scenario-result',scenario)
+            assert last_request[-1]['scenario']==scenario
+            assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
+            assert page.locator('#scenario-result-body script').count()==0
+            if scenario=='plan':
+                expect(page.locator('.scenario-command code')).to_have_text('kubectl -n application get pod test -o json')
+                expect(page.locator('#scenario-result-body')).to_contain_text('Ожидается: UID и причина совпадают')
+                page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
+            if scenario=='recovery':
+                expect(page.locator('.scenario-recovery-state')).to_have_attribute('data-recovery-state','unconfirmed')
+        assert len(last_request)==6
+        assert all('question' not in body and 'previous_id' not in body for body in last_request)
         page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
         page.set_viewport_size({'width':390,'height':844})
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
-        form=page.locator('#ai-form').bounding_box();assert form and form['y']+form['height']<=844
+        expect(page.locator('#scenario-rerun')).to_be_visible()
+        assert page.locator('#page-diagnostics textarea').count()==0
         page.screenshot(path=str(args.screenshots/'ai-mobile.png'),full_page=True)
         broken[0]=True
-        page.get_by_role('button',name='Сжатый анализ',exact=True).click()
-        expect(page.locator('.chat-answer')).to_have_count(4)
-        latest=page.locator('.chat-turn').last
-        expect(latest.locator('.chat-answer')).to_contain_text('превышен лимит EmptyDir')
-        assert 'OOM исключён' not in latest.locator('.chat-answer').inner_text()
-        assert 'unfinished' not in latest.locator('.chat-answer').inner_text()
-        assert not latest.locator('.analysis-sources').evaluate('(e)=>e.open')
-        expect(latest.locator('.analysis-draft-text')).to_be_hidden()
-        assert 'OOM исключён' not in latest.inner_text()
-        latest.locator('.analysis-sources>summary').click()
-        assert not latest.locator('.analysis-draft').evaluate('(e)=>e.open')
-        latest.locator('.analysis-draft>summary').click()
-        expect(latest.locator('.analysis-draft-text')).to_contain_text('OOM исключён')
-        expect(latest.locator('.analysis-facts')).to_contain_text('Подтверждено превышение EmptyDir')
+        requests_before_provider=len(last_request)
+        page.locator('#scenario-provider').select_option('local')
+        expect(page.locator('.scenario-summary')).to_have_count(0)
+        assert len(last_request)==requests_before_provider
+        page.locator('#scenario-buttons [data-scenario=brief]').click()
+        expect(page.locator('.scenario-summary')).to_have_count(1)
+        expect(page.locator('.scenario-summary')).to_contain_text('превышен лимит EmptyDir')
+        expect(page.locator('#scenario-status')).to_contain_text('ИИ не завершил разбор')
+        assert 'OOM исключён' not in page.locator('#scenario-result-body').inner_text()
+        assert 'unfinished' not in page.locator('#scenario-result-body').inner_text()
+        assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
+        page.locator('#scenario-sources>summary').click()
+        expect(page.locator('#scenario-sources')).to_contain_text('Local model HTTP 503')
+        assert 'OOM исключён' not in page.locator('#scenario-sources').inner_text()
+        expect(page.locator('.scenario-answer-table')).to_contain_text('заполнение диска узла не доказано')
         page.screenshot(path=str(args.screenshots/'interrupted-reply.png'),full_page=True)
-        page.get_by_role('button',name='Закрыть анализ',exact=True).click()
-        expect(page.locator('#ai-conversation')).to_be_empty()
+        # Leaving the page deletes the volatile session; returning shows an empty state.
+        page.locator('a[data-page=overview]').click()
+        page.locator('#page-overview').wait_for(state='visible')
+        page.locator('a[data-page=diagnostics]').click()
+        page.locator('#page-diagnostics').wait_for(state='visible')
+        expect(page.locator('.scenario-summary')).to_have_count(0)
+        expect(page.locator('#scenario-target')).to_contain_text('Выберите объект')
+        expect(page.locator('#scenario-rerun')).to_be_disabled()
+        assert closed
+        page.locator('a[data-page=overview]').click()
+        page.locator('#page-overview').wait_for(state='visible')
+        broken[0]=False
         page.locator('.problem-table-body .ai-spark').first.click()
-        expect(page.locator('#ai-conversation .chat-turn')).to_have_count(0)
-        assert not jobs
-        page.get_by_role('button',name='Закрыть анализ',exact=True).click()
+        expect(page.locator('.scenario-summary')).to_have_count(1)
+        expect(page.locator('.scenario-summary')).to_contain_text('Причина пока не установлена')
+        assert len(jobs)==1
+        assert last_request[-1]['scenario']=='brief'
+        assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
+        page.locator('a[data-page=overview]').click()
+        page.locator('#page-overview').wait_for(state='visible')
         page.locator('.problem-pager').get_by_role('button',name='→',exact=True).click()
         expect(page.locator('.problem-pager')).to_contain_text('26–50')
         page.set_viewport_size({'width':390,'height':844})
@@ -179,7 +227,7 @@ def main():
         expect(page.locator('[data-testid=nodes-ready]')).to_have_class(__import__('re').compile('unknown'))
         assert not errors,errors
         browser.close()
-    print('PASS: one screen at 1920x1080 and 1366x768; 3/3/7 rows; real-detail contract; 80 paginated problems; context chat/follow-up/presets/evidence; safe rendering; mobile')
+    print('PASS: fixture overview at 1920x1080 and 1366x768; 3/3/7 rows; node/metric drilldowns; 80 paginated problems; six scenarios; one result; collapsed evidence; local-model failure fallback; safe DOM; fresh reopen; mobile; stale/critical states')
 
 
 if __name__=='__main__':main()

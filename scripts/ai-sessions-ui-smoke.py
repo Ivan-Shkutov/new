@@ -37,9 +37,9 @@ with sync_playwright() as p:
   assert any(m['role']=='assistant' for m in requests[-1]['messages'])
   assert 'INTERNAL-FIXTURE' not in json.dumps(requests[-1]['messages'])
   old=sids[-1]
-  # Reopen through the active navigation link: hash does not change.
+  # Reopen the compatibility chat explicitly: it has no main navigation item.
   page.get_by_role('button',name='Закрыть анализ',exact=True).click()
-  page.locator('#navigation a[data-page=chat]').click()
+  page.locator('#new-chat').click()
   expect(page.locator('#ai-form button[type=submit]')).to_be_enabled()
   expect(page.locator('.chat-turn')).to_have_count(0)
   assert sids[-1]!=old
@@ -47,14 +47,15 @@ with sync_playwright() as p:
   expect(page.locator('.chat-answer')).to_have_count(1)
   assert not any(m['role']=='assistant' for m in requests[-1]['messages'])
   # Close and reopen in one task, before the old queued close event fires.
-  page.evaluate("document.querySelector('#ai-dialog').close(); document.querySelector('#navigation a[data-page=chat]').click()")
+  page.evaluate("document.querySelector('#ai-dialog').close(); document.querySelector('#new-chat').click()")
   expect(page.locator('#ai-dialog')).to_be_visible()
   expect(page.locator('#ai-form button[type=submit]')).to_be_enabled()
   expect(page.locator('.chat-turn')).to_have_count(0)
   page.screenshot(path=str(a.screenshots/'general-chat.png'))
   old=sids[-1];page.get_by_role('button',name='Закрыть анализ',exact=True).click();expect(page.locator('#ai-conversation')).to_be_empty()
   for _ in range(50):
-   if context.request.get(a.base_url+f'/api/sessions/{old}/jobs/{jids[-1]}').status==404:break
+   # Idempotent cleanup probe: tolerate one reset of an idle keep-alive socket.
+   if context.request.get(a.base_url+f'/api/sessions/{old}/jobs/{jids[-1]}',max_retries=1).status==404:break
    page.wait_for_timeout(50)
   assert context.request.get(a.base_url+'/api/investigations').json()==history
   page.get_by_role('button',name='Новый диалог',exact=True).click();expect(page.locator('#ai-form button[type=submit]')).to_be_enabled()

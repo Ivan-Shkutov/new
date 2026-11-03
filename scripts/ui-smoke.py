@@ -44,7 +44,7 @@ def main():
             assert page.locator('#global-error').is_hidden(), 'Initial API error'
             page.get_by_role('link', name='Ресурсы', exact=True).click()
             page.get_by_role('heading', name='Выберите кластер', exact=True).wait_for()
-            page.get_by_role('link', name='Расследования', exact=True).click()
+            page.goto('/#investigations')  # Compatibility archive has no main navigation item.
             page.get_by_role('heading', name='Выберите кластер', exact=True).wait_for()
             page.get_by_role('link', name='База знаний', exact=True).click()
             page.locator('#document-form select[name=scope]').select_option('global')

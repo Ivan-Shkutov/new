@@ -14,6 +14,7 @@ jobs:
       - run: python -m pip install pytest==8.3.5
       - run: python -m pytest -q
       - run: node --check pulse_app/static/app.js
+      - run: node --check pulse_app/static/scenarios.js
       - name: Evaluate dashboard PromQL with pinned Prometheus
         run: |
           docker pull prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
