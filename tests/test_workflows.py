@@ -98,6 +98,58 @@ def test_plan_previous_logs_targets_the_container_with_the_observed_failure():
     assert not any('-c healthy-sidecar' in command for command in commands)
 
 
+@pytest.mark.parametrize('previous', [False, True])
+def test_oom_plan_reads_the_terminated_container_run_without_claiming_a_limit_breach(previous):
+    report = incident()
+    report['pod'].update(phase='Running' if previous else 'Failed', reason='', message='',
+                        container_statuses=[{'name': 'sidecar', 'state': {'running': {}}},
+                            {'name': 'api', 'lastState' if previous else 'state':
+                                {'terminated': {'reason': 'OOMKilled', 'exitCode': 137}},
+                             'restartCount': 3 if previous else 0}])
+    result = w.build_result('plan', report)
+    logs = [c for step in result['steps'] for c in step['commands'] if ' logs ' in c['command']]
+    assert len(logs) == 1
+    assert '-c api' in logs[0]['command']
+    assert (' --previous' in logs[0]['command']) is previous
+    assert 'не установлены' in result['rows'][0]['value']
+    assert 'превышен лимит памяти' not in result['rows'][0]['value']
+
+
+@pytest.mark.parametrize('detail', [
+    'Проверьте доступ, временно добавив правило для UDP/53.',
+    'Временно измените NetworkPolicy и сопоставьте результат.',
+    'Необходимо перезапустить Pod для проверки гипотезы.',
+    'Увеличить лимит памяти до 1Gi.',
+    'Disable TLS and restart the service.',
+    'Disable TLS verification temporarily.',
+    'Временно разрешить DNS в политике.',
+    'helm upgrade deployment',
+    'python3 -c "print(1)"',
+])
+def test_model_readonly_checks_reject_mutation_in_plain_language(detail):
+    answer = model(checks=[{**suggestion(), 'detail': detail}])
+    result = w.build_result('plan', incident(), answer)
+    assert result['model']['status'] == 'invalid'
+    assert result['status'] == 'partial'
+    assert detail not in str(result)
+    assert 'EmptyDir' in result['rows'][0]['value']
+
+
+def test_legitimate_establishing_a_cause_and_reviewing_changes_is_not_installation():
+    answer = model(checks=[{**suggestion(),
+        'detail': 'Установить источник роста по истории изменений и правилам ротации.'}])
+    assert w.build_result('causes', incident(), answer)['model']['status'] == 'complete'
+
+
+def test_plan_does_not_invent_service_commands_without_observed_service_evidence():
+    report = recovered()
+    report['services']['items'].append({'name': 'guessed-service'})
+    result = w.build_result('plan', report)
+    commands = [c['command'] for step in result['steps'] for c in step['commands']]
+    assert any(' endpoints agent ' in command for command in commands)
+    assert not any('guessed-service' in command for command in commands)
+
+
 @pytest.mark.parametrize('answer', [
     'Произошла нехватка памяти на узле.',
     '{"hypotheses":[],"checks":[],"summary":"invented"}',

@@ -87,8 +87,14 @@ def model_prompt(scenario_id):
         'Не считай info или SendText доказательством успешной доставки. '
         'Не угадывай важность, простой сервиса, потерю данных, длительность или время аварии. '
         'Ready/endpoints не подтверждают внешнюю доступность приложения. '
+        'OOMKilled и наличие memory limit не доказывают превышение именно лимита; различай OOM контейнера и узла. '
+        'Running/Ready не измеряет память и не исключает повторения. kubectl top не даёт историю. '
+        'Не угадывай Deployment, selectors, DNS Service и cert-manager по имени приложения. '
         'Не предлагай shell, kubectl, exec, удаления, перезапуски и другие команды: команды формирует Pulse. '
-        'Предлагай только проверки и условные рекомендации по выбранной теме, без общего учебника. '
+        'Не предлагай изменений даже словами, включая временную правку NetworkPolicy или увеличение лимита. '
+        'Условное исправление формирует Pulse; checks — только получение или сопоставление данных. '
+        'Если не хватает идентичности объекта, предложи сначала её установить. '
+        'Предлагай только проверки по выбранной теме, без общего учебника. '
         'Максимум text 500 символов, title 100, detail 350, expected 200. '
         'Не повторяй журнал проверок, секреты, токены и весь контекст.'
     )
@@ -141,9 +147,21 @@ def parse_model_answer(answer, report, scenario_id='deep'):
     if words > (80 if scenario_id == 'brief' else 300):
         raise ValueError('Модель превысила размер ответа сценария')
     # Keep model-supplied executable snippets or markup out of the primary report.
-    if any(re.search(r'```|<\s*/?\s*(?:script|iframe|img)\b|\bkubectl\b|\b(?:curl|wget|sudo)\s', text, re.I)
+    if any(re.search(r'```|<\s*/?\s*(?:script|iframe|img)\b|\b(?:kubectl|helm)\b|\b(?:curl|wget|sudo|bash|sh|python[23]?)\s', text, re.I)
            for text in strings):
         raise ValueError('Модель вернула команды вместо структурированного разбора')
+    # The six scenarios reserve fixes for Pulse's conditional plan. A plain-text
+    # instruction to mutate infrastructure is still a mutation, not a read check.
+    mutation = (r'\b(?:delete|restart|reboot|drain|patch|apply|scale|install|uninstall|disable|enable|remove|modify)\b|'
+                r'\b(?:удал(?:ите|ить|ив)|перезапуст(?:ите|ить|ив)|перезагруз(?:ите|ить|ив)|'
+                r'измен(?:ите|ить|ив)|добав(?:ьте|ить|ив)|созда(?:йте|ть|в)|'
+                r'увелич(?:ьте|ить|ив)|уменьш(?:ите|ить|ив)|отключ(?:ите|ить|ив)|'
+                r'включ(?:ите|ить|ив)|разреш(?:ите|ить)|замен(?:ите|ить|ив)|'
+                r'примен(?:ите|ить|ив)|очист(?:ите|ить|ив)|'
+                r'отредактиру(?:йте|й)|исправ(?:ьте|ить|ив))\b|'
+                r'\bустанов(?:ите|ить|ив)\s+(?:пакет|cert-manager|приложени|программ|helm)')
+    if any(re.search(mutation, text, re.I) for text in strings):
+        raise ValueError('Модель предложила изменение вместо проверки только для чтения')
     return connectors.redact_structure(data)
 
 
@@ -374,7 +392,7 @@ def _cause_signal(report, refs):
         for container in statuses:
             state = container.get('lastState' if previous else 'state') or {}
             if state.get('terminated', {}).get('reason') == 'OOMKilled':
-                return {'code': 'oom', 'container': _name(container.get('name')), 'evidence_ids': refs,
+                return {'code': 'oom', 'container': _name(container.get('name')), 'previous': previous, 'evidence_ids': refs,
                         'detail': ('Последнее завершение контейнера' if previous else 'Контейнер завершён') +
                                   ' с причиной OOMKilled. Источник нехватки памяти и достаточность лимита ещё не установлены.',
                         'first': 'Сопоставьте лимит памяти контейнера с историей потребления и событиями узла.',
@@ -439,8 +457,9 @@ def _plan(report, cause):
         if cause and cause['code'] in ('oom', 'crash'):
             container_name = cause.get('container')
             if container_name:
-                commands.append({'command': f'kubectl -n {namespace} logs {name} -c {container_name} --previous --tail=100',
-                                 'purpose': 'Прочитать доступные логи предыдущего запуска фактического контейнера.',
+                previous = cause.get('previous', True)
+                commands.append({'command': f'kubectl -n {namespace} logs {name} -c {container_name}' + (' --previous' if previous else '') + ' --tail=100',
+                                 'purpose': 'Прочитать доступные логи ' + ('предыдущего' if previous else 'завершившегося текущего') + ' запуска фактического контейнера.',
                                  'expected': 'Ошибка приложения или отсутствие сохранённых логов; недоступность не равна отсутствию ошибки.', 'scope': scope})
     owners = [owner for owner in report.get('owners', []) if owner.get('source_type') == 'live'
               and owner.get('uid') and _evidence_ok(report, _refs(owner.get('evidence_id')))]
@@ -463,7 +482,8 @@ def _plan(report, cause):
     verify_commands = []
     for service in (report.get('services') or {}).get('items', [])[:2]:
         service_name = _name(service.get('name'))
-        if namespace and service_name:
+        service_ref = service.get('evidence_id')
+        if namespace and service_name and _evidence_ok(report, _refs(service_ref)):
             verify_commands.append({'command': f'kubectl -n {namespace} get endpoints {service_name} -o json',
                                     'purpose': 'Проверить адреса фактически найденного сервиса.',
                                     'expected': 'Есть готовый адрес текущего Pod с проверенным UID.', 'scope': scope})

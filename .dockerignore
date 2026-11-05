@@ -10,3 +10,9 @@ backups
 __pycache__
 .pytest_cache
 node_modules
+releases/
+image/
+docs/
+design/
+tests/
+scripts/

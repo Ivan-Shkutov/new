@@ -242,14 +242,15 @@ def health_check(runtime: Path):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Pulse Clusters 0.15.0 lifecycle')
+    parser = argparse.ArgumentParser(description='Pulse Clusters 0.15.1 lifecycle')
     parser.add_argument('--runtime', type=Path, default=Path(os.environ.get('PULSE_RUNTIME', ROOT / 'runtime')))
     sub = parser.add_subparsers(dest='command', required=True)
     init = sub.add_parser('init'); init.add_argument('--port', type=int, default=8090)
     for name in ('start', 'start-offline', 'stop', 'status', 'logs', 'build', 'dev', 'check'):
         sub.add_parser(name)
     doctor=sub.add_parser('doctor');doctor.add_argument('--cluster',default='peoplehub')
-    llm_check=sub.add_parser('llm-check');llm_check.add_argument('--case',choices=['all','service','emptydir','exit137','network'],default='all');llm_check.add_argument('--show-answers',action='store_true')
+    from pulse_app.llm_check import CASES as LLM_CASES
+    llm_check=sub.add_parser('llm-check');llm_check.add_argument('--case',choices=['all',*LLM_CASES],default='all');llm_check.add_argument('--show-answers',action='store_true')
     backup = sub.add_parser('backup'); backup.add_argument('--output-dir', type=Path, default=ROOT / 'backups')
     restore = sub.add_parser('restore'); restore.add_argument('archive', type=Path); restore.add_argument('--confirm-restore', action='store_true')
     export = sub.add_parser('export-image'); export.add_argument('output', type=Path)
@@ -281,7 +282,7 @@ def main(argv=None):
             output.parent.mkdir(parents=True, exist_ok=True)
             if output.exists():
                 raise ValueError('Output file exists')
-            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.15.0'], check=True)
+            subprocess.run(['docker', 'image', 'save', '--output', str(output), 'pulse-clusters:0.15.1'], check=True)
             Path(str(output) + '.sha256').write_text(f'{file_hash(output)}  {output.name}\n')
         elif args.command in ('backup', 'restore'):
             if args.command == 'restore' and not args.confirm_restore:

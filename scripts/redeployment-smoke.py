@@ -38,6 +38,7 @@ def free_port():
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--previous-source',type=Path,required=True)
+    parser.add_argument('--upgrade-source',type=Path,help='Also exercise the packaged automatic upgrade and its generated rollback')
     a=parser.parse_args();old=a.previous_source.resolve()
     assert (old/'pulse').is_file(),'Previous source CLI missing'
     with tempfile.TemporaryDirectory(prefix='pulse-redeploy-') as directory:
@@ -96,6 +97,21 @@ def main():
             assert api('/api/settings',https=True)['llm']['has_key']
             assert api('/api/investigations/retained',https=True)['answer']=='fixture answer'
             print('PASS: previous Docker release -> backup -> validated restore -> current exact build; encrypted connections, password/key, LLM and history retained; recreated Caddy reads restored config; trusted TLS and authenticated API succeed.')
+            if a.upgrade_source:
+                packaged=a.upgrade_source.resolve()
+                cli(ROOT,'stop');cli(old,'start-offline')
+                before_upgrade=api('/healthz',https=True)
+                auto_backup=folder/'auto-backup'
+                run(sys.executable,packaged/'scripts/upgrade-existing.py','--container',
+                    f'pulse-clusters-{port}-pulse-1','--backup-dir',auto_backup)
+                assert api('/healthz',https=True)['build_id']==identity()['build_id']
+                assert hashlib.sha256((runtime/'registry.key').read_bytes()).hexdigest()==key
+                assert api('/api/settings',https=True)['llm']['has_key']
+                assert api('/api/investigations/retained',https=True)['answer']=='fixture answer'
+                run(auto_backup/'rollback.sh')
+                assert api('/healthz',https=True)['build_id']==before_upgrade['build_id']
+                assert api('/api/investigations/retained',https=True)['answer']=='fixture answer'
+                print('PASS: packaged image import -> automatic runtime discovery -> backup -> exact-build upgrade -> generated rollback to previous source; retained data and trusted TLS verified.')
         except Exception:
             logs=subprocess.run(['docker','logs','--tail','12',name],text=True,capture_output=True,timeout=10)
             print((logs.stdout+logs.stderr)[-2500:],file=sys.stderr)

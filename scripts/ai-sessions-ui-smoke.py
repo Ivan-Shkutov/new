@@ -68,12 +68,12 @@ with sync_playwright() as p:
   checked=subprocess.run([str(ROOT/'pulse'),'--runtime',str(a.password_file.parent.parent),'llm-check'],capture_output=True,text=True)
   assert checked.returncode==0,checked.stdout+checked.stderr
   report=json.loads((a.password_file.parent.parent/'llm-check-report.json').read_text())
-  assert report['generation_ok'] and report['quality_verified'] is False and len(report['cases'])==4
-  assert len(requests)==before_check+4 and all(r['policy_applied'] for r in report['cases'])
+  assert report['generation_ok'] and report['quality_verified'] is False and len(report['cases'])==9
+  assert len(requests)==before_check+9 and all(r['policy_applied'] for r in report['cases'])
   assert 'INTERNAL-FIXTURE' not in json.dumps(report)
   assert context.request.get(a.base_url+'/api/investigations').json()==history
   print('PASS: real browser/API/HTTP-model fixture; general chat; multi-turn; local engine; close+Escape clear memory; reopen starts empty; no durable history written.')
-  print('PASS: shared DevOps policy; think excluded from visible answer/history; actual llm-check CLI through Docker/API with four fixture completions and a manual quality rubric.')
+  print('PASS: shared DevOps policy; think excluded from visible answer/history; actual llm-check CLI through Docker/API with nine fixture completions and a manual quality rubric.')
  finally:
   old=before.get('llm',{})
   if old.get('url') and old.get('model'):context.request.put(a.base_url+'/api/settings',data={'llm':{'url':old['url'],'model':old['model']}},headers=headers)

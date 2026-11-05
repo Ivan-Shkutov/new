@@ -25,7 +25,7 @@ def test_live_check_uses_local_engine_policy_and_removes_temporary_sessions(clie
         return data
     report=run_cases(api,interval=.01)
     assert report['generation_ok'] and report['quality_verified'] is False
-    assert len(calls)==len(report['cases'])==len(CASES)==4
+    assert len(calls)==len(report['cases'])==len(CASES)==9
     assert deleted==sessions
     for sid,jid in zip(sessions,jobs):assert client.get(f'/api/sessions/{sid}/jobs/{jid}').status_code==404
     assert all(row['review'] and row['policy_applied'] for row in report['cases'])

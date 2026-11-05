@@ -5,6 +5,7 @@ Prepare wheels first using pip download --require-hashes --only-binary=:all:
 -r requirements.txt -d wheelhouse. Stage new source files before packaging.
 """
 import hashlib
+import argparse
 import io
 import json
 import sys
@@ -21,6 +22,9 @@ def digest(path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--include-image', action='store_true', help='Include the prebuilt Docker image for installation without a registry')
+    args = parser.parse_args()
     version = re.search(r"__version__ = '([^']+)'", (ROOT / 'pulse_app/__init__.py').read_text())[1]
     prefix = f'pulse-clusters-{version}'
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
@@ -29,6 +33,11 @@ def main():
     if not wheels:
         raise SystemExit('Download the hashed wheelhouse before packaging')
     files = sources + wheels
+    if args.include_image:
+        image = ROOT / 'image' / f'{prefix}.tar.gz'
+        if not image.is_file():
+            raise SystemExit('Export the verified Docker image to ' + str(image))
+        files.append(image)
     if any(not p.is_file() or p.is_symlink() for p in files):
         raise SystemExit('Every release input must be a regular file')
     output = ROOT / 'releases' / f'{prefix}-complete.tar.gz'
