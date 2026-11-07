@@ -342,11 +342,12 @@ def test_investigation_queue_is_bounded(client, monkeypatch):
     monkeypatch.setattr(connectors, 'llm_chat', model)
     submitted = []
     try:
-        for _ in range(4):
+        assert client.get('/api/settings').json()['analysis_queue']=={'workers':1,'queued':1,'wait_seconds':60}
+        for _ in range(2):
             response = client.post('/api/investigations', json={'cluster_id':'one','question':'Проверьте состояние'}, headers=MUTATION)
             assert response.status_code == 202
             submitted.append(response.json()['id'])
-        assert client.post('/api/investigations', json={'cluster_id':'one','question':'Пятый запрос'}, headers=MUTATION).status_code == 429
+        assert client.post('/api/investigations', json={'cluster_id':'one','question':'Лишний запрос'}, headers=MUTATION).status_code == 429
     finally:
         release.set()
     for jid in submitted:

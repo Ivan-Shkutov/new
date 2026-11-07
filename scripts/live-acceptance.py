@@ -6,10 +6,13 @@ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--url',required=T
 u=urllib.parse.urlsplit(a.url)
 if u.scheme!='https' and not (u.scheme=='http' and u.hostname in ('127.0.0.1','localhost','::1')):p.error('HTTPS required outside loopback')
 ctx=ssl.create_default_context(cafile=str(a.ca_file) if a.ca_file else None)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*args,**kwargs):return None
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect(),urllib.request.HTTPSHandler(context=ctx))
 headers={'Authorization':'Basic '+base64.b64encode((a.username+':'+a.password_file.read_text().strip()).encode()).decode(),'X-Pulse-Request':'1','Content-Type':'application/json','Origin':a.url.rstrip('/')}
 def api(method,path,body=None):
  req=urllib.request.Request(a.url.rstrip('/')+path,data=json.dumps(body).encode() if body is not None else None,method=method,headers=headers)
- with urllib.request.urlopen(req,context=ctx,timeout=30) as r:return json.load(r)
+ with opener.open(req,timeout=30) as r:return json.load(r)
 health=api('GET','/healthz');assert health['status']=='ok';print('Pulse',health['version'],'HTTPS/API OK')
 clusters=api('GET','/api/clusters')['items'];print('Clusters:',len(clusters))
 kb=api('GET','/api/knowledge/status');print('Qdrant:',kb.get('qdrant','unconfigured'),'model:',kb['model'],'catalogue:',kb['documents'])
@@ -21,7 +24,13 @@ if a.question:
  try:
   body={'question':a.question}
   if a.problem_id:body['problem_id']=a.problem_id
-  jid=api('POST',f'/api/sessions/{sid}/messages',body)['id'];deadline=time.monotonic()+420
+  settings=api('GET','/api/settings');budget=settings.get('llm',{}).get('timeout_seconds',300)
+  selected=next((c for c in clusters if c['id']==a.cluster),{})
+  if selected.get('holmes',{}).get('enabled'):budget=selected['holmes'].get('timeout_seconds',600)
+  if selected.get('astra_ai',{}).get('enabled'):budget=900
+  # Include admitted queue wait and collection/search time before generation.
+  deadline=time.monotonic()+budget+settings.get('analysis_queue',{}).get('wait_seconds',60)+240
+  jid=api('POST',f'/api/sessions/{sid}/messages',body)['id']
   while time.monotonic()<deadline:
    result=api('GET',f'/api/sessions/{sid}/jobs/{jid}')
    if result['status'] not in ('queued','running'):break

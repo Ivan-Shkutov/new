@@ -504,17 +504,8 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
 
 
 def llm_chat(settings: dict, messages: list) -> str:
-    from .ai_limits import limits
-    budget = limits(settings)
-    if not isinstance(messages, list) or not messages or len(messages) > 60:
-        raise ConnectorError("Invalid LLM conversation")
-    clean = []
-    for message in messages:
-        if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
-            raise ConnectorError("Unsupported LLM message")
-        clean.append({"role": message["role"], "content": _text(message.get("content"), "message", 100000)})
-    if sum(len(m["content"]) for m in clean) > budget['max_context_chars']:
-        raise ConnectorError("LLM context exceeds the configured application limit")
+    from .ai_limits import checked_messages
+    clean, budget = checked_messages(settings, messages)
     model = _text(settings.get("model"), "model", 200)
     if not model:
         raise ConnectorError("LLM model is required")
@@ -665,9 +656,9 @@ def dashboard_metrics(settings, window='1h'):
 
 def holmes_chat(settings, messages):
     """HolmesGPT 0.45.0 /api/chat contract; no silent fallback to a different engine."""
+    from .ai_limits import checked_messages
+    messages, budget = checked_messages(settings, messages, agent=True)
     ask = messages[-1]['content']
-    from .ai_limits import limits
-    budget = limits(settings, agent=True)
     deadline=time.monotonic()+budget['timeout_seconds']
     with _client(settings, timeout=httpx.Timeout(budget['timeout_seconds'],connect=10)) as client:
         info=_request(client,'GET',_url(settings.get('url'))+'/api/info',params={'detail':'full'},deadline=deadline,timeout=httpx.Timeout(min(15,budget['timeout_seconds']),connect=10))

@@ -9,7 +9,6 @@ import secrets
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,8 +34,9 @@ def create_app(runtime=None, polling=True):
     auth = HTTPBasic(auto_error=False)
     stop = threading.Event()
     refresh_lock = threading.Lock()
-    slots = threading.BoundedSemaphore(4)
-    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='pulse-investigation')
+    from .analysis_queue import AnalysisExecutor, configuration
+    pool = AnalysisExecutor(**configuration())
+    slots = pool
     state = {}
     from .sessions import Sessions, SessionGone
     sessions = Sessions()
@@ -114,8 +114,9 @@ def create_app(runtime=None, polling=True):
             from .knowledge import Knowledge
             state['knowledge'] = Knowledge(state['store'])
             def reap_sessions():
-                while not stop.wait(30):
+                while not stop.wait(1):
                     with sessions.lock:sessions.prune()
+                    pool.expire()
             reaper=threading.Thread(target=reap_sessions,daemon=True)
             reaper.start()
             thread = threading.Thread(target=collector, daemon=True) if polling else None
@@ -578,7 +579,7 @@ def create_app(runtime=None, polling=True):
     def settings():
         llm = db().settings().get('llm', {})
         from .ai_limits import limits
-        return {'llm': {'url':llm.get('url',''), 'model':llm.get('model',''), 'has_key': bool(llm.get('api_key')), **limits(llm)}, 'poll_seconds': interval}
+        return {'llm': {'url':llm.get('url',''), 'model':llm.get('model',''), 'has_key': bool(llm.get('api_key')), **limits(llm)}, 'poll_seconds': interval, 'analysis_queue':dict(pool.settings)}
 
     class SettingsInput(BaseModel):
         llm: dict
@@ -734,9 +735,10 @@ def create_app(runtime=None, polling=True):
     class ScenarioSourcesChanged(connectors.ConnectorError):
         pass
 
-    def investigate(jid, body, cfg, llm, resolved_context, source_stamp=None):
+    def investigate(jid, body, cfg, llm, resolved_context, source_stamp=None, enqueued_at=None):
         live_report={}
         run_started=time.monotonic()
+        trace=[{'tool':'analysis-queue','status':'started','elapsed_seconds':round(max(0,run_started-(enqueued_at or run_started)),2)}]
         def check_scenario_sources():
             if not body.scenario and not source_stamp:return
             current=db().cluster(body.cluster_id)
@@ -764,7 +766,6 @@ def create_app(runtime=None, polling=True):
                 update(evidence=json.dumps(report,ensure_ascii=False),trace=json.dumps([{'tool':'Kubernetes live inventory','status':intent},{'tool':'engine','status':'Точная таблица API; генерация моделью не используется'}],ensure_ascii=False),answer=inventory_answer(report),status='done' if report['complete'] else 'failed',error=report.get('error') or '')
                 return
             from .runbooks import build_system_prompt,select_runbooks,POLICY_ID,POLICY_VERSION
-            trace=[]
             check_scenario_sources()
             if body.cluster_id and cluster(body.cluster_id)['config'].get('generation')!=cfg.get('generation'):
                 raise connectors.ConnectorError('Подключение изменилось. Запустите анализ заново.')
@@ -972,8 +973,18 @@ def create_app(runtime=None, polling=True):
             from .ai_limits import error_code
             partial_trace=locals().get('trace',[])+[{'tool':'analysis','status':'failed','code':error_code(error),'run_id':jid,'elapsed_seconds':round(time.monotonic()-run_started,2)}]
             update(status='failed',error=error,trace=json.dumps(connectors.redact_structure(partial_trace),ensure_ascii=False))
-        finally:
-            slots.release()
+    def submit_analysis(jid, body, cfg, llm, resolved, source_stamp=None):
+        def expired():
+            if stop.is_set():return
+            error=f"Очередь анализа: ожидание превысило {pool.settings['wait_seconds']} секунд. Повторите запрос после завершения текущего разбора."
+            trace=json.dumps([{'tool':'analysis-queue','status':'failed','code':'queue_timeout','run_id':jid}],ensure_ascii=False)
+            if body.session_id:
+                try:sessions.update(body.session_id,jid,{'status':'failed','error':error,'trace':trace})
+                except SessionGone:pass
+            else:
+                db().execute('UPDATE investigations SET status=?,error=?,trace=? WHERE id=?',('failed',error,trace,jid))
+        return pool.submit(investigate,jid,body,cfg,llm,resolved,source_stamp,
+                           enqueued_at=time.monotonic(),session_id=body.session_id,on_expired=expired)
 
     @api.post('/investigations', status_code=202)
     def create_investigation(body: Investigate):
@@ -1009,7 +1020,7 @@ def create_app(runtime=None, polling=True):
         try:
             db().execute('INSERT INTO investigations(id,cluster_id,question,status,created_at,previous_id) VALUES (?,?,?,?,?,?)', (jid,body.cluster_id,body.question,'queued',now(),body.previous_id or ''))
             db().execute('UPDATE investigations SET context=? WHERE id=?',(json.dumps(connectors.redact_structure(resolved_context),ensure_ascii=False),jid))
-            pool.submit(investigate,jid,body,item['config'],llm,resolved_context)
+            submit_analysis(jid,body,item['config'],llm,resolved_context)
         except Exception:
             slots.release()
             raise
@@ -1035,6 +1046,7 @@ def create_app(runtime=None, polling=True):
     @api.delete('/sessions/{sid}')
     def close_session(sid: str):
         sessions.delete(sid)
+        pool.cancel_session(sid)
         return {'ok':True}
 
     @api.get('/sessions/{sid}/jobs/{jid}')
@@ -1106,7 +1118,7 @@ def create_app(runtime=None, polling=True):
         try:
             job=dict(id=jid,cluster_id=cid,scenario=body.scenario,question=body.question,status='queued',answer='',error='',created_at=now(),previous_id='',context=json.dumps(connectors.redact_structure(resolved),ensure_ascii=False),trace='[]',evidence='{}',scenario_result=None,progress={'phase':'queued','checks':0})
             sessions.add(sid,job)
-            pool.submit(investigate,jid,body,cfg,llm,resolved,source_stamp)
+            submit_analysis(jid,body,cfg,llm,resolved,source_stamp)
         except (ValueError,SessionGone) as exc:
             slots.release();raise HTTPException(409,str(exc) or 'Диагностика закрыта')
         except Exception:
@@ -1167,7 +1179,7 @@ def create_app(runtime=None, polling=True):
         try:
             job=dict(id=jid,cluster_id=cid,question=body.question,status='queued',answer='',error='',created_at=now(),previous_id=body.previous_id or '',context=json.dumps(connectors.redact_structure(resolved),ensure_ascii=False),trace='[]',evidence='{}')
             sessions.add(sid,job)
-            pool.submit(investigate,jid,body,cfg,llm,resolved,source_stamp)
+            submit_analysis(jid,body,cfg,llm,resolved,source_stamp)
         except (ValueError,SessionGone) as e:
             slots.release();raise HTTPException(409,str(e) or 'Диалог закрыт')
         except Exception:

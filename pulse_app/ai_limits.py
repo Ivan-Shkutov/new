@@ -27,8 +27,30 @@ def limits(settings, *, agent=False):
     return result
 
 
+def checked_messages(settings, messages, *, agent=False):
+    """One explicit budget for all providers; never silently crop evidence."""
+    from .connectors import ConnectorError
+    budget = limits(settings, agent=agent)
+    if not isinstance(messages, list) or not messages or len(messages) > 60:
+        raise ConnectorError('Invalid LLM conversation')
+    clean, size = [], 0
+    for message in messages:
+        if not isinstance(message, dict) or message.get('role') not in ('system', 'user', 'assistant'):
+            raise ConnectorError('Unsupported LLM message')
+        content = message.get('content')
+        if not isinstance(content, str):
+            raise ConnectorError('Invalid LLM message content')
+        size += len(content)
+        if size > budget['max_context_chars']:
+            raise ConnectorError('LLM context exceeds the configured application limit; превышен общий лимит контекста')
+        clean.append({'role': message['role'], 'content': content})
+    return clean, budget
+
+
 def error_code(message):
     text = str(message).lower()
+    if 'очеред' in text or 'queue' in text: return 'queue_timeout'
+    if 'context' in text or 'контекст' in text: return 'context_limit'
     if '401' in text or '403' in text: return 'access_denied'
     if '429' in text: return 'rate_limited'
     if 'length' in text or 'token' in text and 'limit' in text: return 'output_truncated'

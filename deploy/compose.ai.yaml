@@ -26,7 +26,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   indexer:
-    image: pulse-clusters:0.16.0
+    image: pulse-clusters:0.16.1
     profiles: [library]
     network_mode: host
     user: "${PULSE_UID:-65532}:${PULSE_GID:-65532}"

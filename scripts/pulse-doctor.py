@@ -14,7 +14,9 @@ env=dict(line.split('=',1) for line in (runtime/'.env').read_text().splitlines()
 base='http://127.0.0.1:'+env.get('PULSE_PORT','8090')
 password=(runtime/'secrets/portal-password').read_text().strip()
 headers={'Authorization':'Basic '+base64.b64encode((env.get('PULSE_USERNAME','pulse')+':'+password).encode()).decode(),'X-Pulse-Request':'1'}
-opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*args,**kwargs):return None
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
 def api(path):
  try:
   with opener.open(urllib.request.Request(base+path,headers=headers),timeout=120) as r:return json.load(r)

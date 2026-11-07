@@ -1,6 +1,6 @@
 services:
   pulse:
-    image: pulse-clusters:0.16.0
+    image: pulse-clusters:0.16.1
     build:
       context: .
       args:
@@ -28,6 +28,9 @@ services:
       PULSE_QDRANT_KEY_FILE: ${PULSE_QDRANT_KEY_FILE:-}
       PULSE_EMBEDDINGS_KEY_FILE: ${PULSE_EMBEDDINGS_KEY_FILE:-}
       PULSE_POLL_SECONDS: ${PULSE_POLL_SECONDS:-30}
+      PULSE_AI_WORKERS: ${PULSE_AI_WORKERS:-1}
+      PULSE_AI_QUEUE: ${PULSE_AI_QUEUE:-1}
+      PULSE_AI_QUEUE_WAIT: ${PULSE_AI_QUEUE_WAIT:-60}
     command: [python, -m, uvicorn, "pulse_app.app:app", --host, "127.0.0.1", --port, "${PULSE_PORT:-8090}"]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PULSE_PORT:-8090}/healthz', timeout=5)"]

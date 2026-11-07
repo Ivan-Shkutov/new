@@ -14,8 +14,8 @@ class IncompleteAnswer(c.ConnectorError):
 
 
 def chat(settings, messages, progress=None):
-    from .ai_limits import limits
-    budget=limits(settings)
+    from .ai_limits import checked_messages
+    clean,budget=checked_messages(settings,messages)
     # A value copied from DevTools often includes the header scheme. Normalize
     # only this adapter, including already saved values, without logging it.
     settings=dict(settings)
@@ -29,13 +29,6 @@ def chat(settings, messages, progress=None):
     url=c._url(settings.get('url'))
     model=c._text(settings.get('model'),'model',200)
     if not model:raise c.ConnectorError('Нужен model ID Astra AI')
-    if not isinstance(messages,list) or not messages or len(messages)>60:raise c.ConnectorError('Неверный формат контекста Astra AI')
-    clean=[]
-    for message in messages:
-        if not isinstance(message,dict) or message.get('role') not in ('system','user','assistant'):raise c.ConnectorError('Неподдерживаемая роль чата')
-        clean.append({'role':message['role'],'content':c._text(message.get('content'),'message',100000)})
-    if not clean or len(clean)>60 or sum(len(m['content']) for m in clean)>budget['max_context_chars']:
-        raise c.ConnectorError('Контекст Astra AI превышает лимит')
     parts=[];done=False;finished=False;data=[];event='message';size=0;buffer='';count=0;published=0;usage={}
     deadline=time.monotonic()+budget['timeout_seconds']
     decoder=codecs.getincrementaldecoder('utf-8')('strict')
