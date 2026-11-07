@@ -102,14 +102,17 @@ def main():
                 cli(ROOT,'stop');cli(old,'start-offline')
                 before_upgrade=api('/healthz',https=True)
                 auto_backup=folder/'auto-backup'
+                current=folder/'current';current.symlink_to(old)
                 run(sys.executable,packaged/'scripts/upgrade-existing.py','--container',
-                    f'pulse-clusters-{port}-pulse-1','--backup-dir',auto_backup)
+                    f'pulse-clusters-{port}-pulse-1','--backup-dir',auto_backup,'--current-link',current)
                 assert api('/healthz',https=True)['build_id']==identity()['build_id']
+                assert current.resolve()==packaged
                 assert hashlib.sha256((runtime/'registry.key').read_bytes()).hexdigest()==key
                 assert api('/api/settings',https=True)['llm']['has_key']
                 assert api('/api/investigations/retained',https=True)['answer']=='fixture answer'
                 run(auto_backup/'rollback.sh')
                 assert api('/healthz',https=True)['build_id']==before_upgrade['build_id']
+                assert current.resolve()==old
                 assert api('/api/investigations/retained',https=True)['answer']=='fixture answer'
                 print('PASS: packaged image import -> automatic runtime discovery -> backup -> exact-build upgrade -> generated rollback to previous source; retained data and trusted TLS verified.')
         except Exception:

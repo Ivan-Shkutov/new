@@ -154,7 +154,7 @@ def test_commands_mode_uses_real_evidence_and_no_shell(client,monkeypatch):
     result=client.post('/api/investigations',json={'cluster_id':'one','question':'Команды','namespace':'am-agent','pod':'bad','mode':'commands'},headers=MUTATION)
     job=wait(client,result.json()['id'])
     assert job['status']=='done'
-    assert 'Нужные команды' in captured[0][0]['content']
+    assert 'единый последовательный план' in captured[0][0]['content']
     assert 'ephemeral-storage' in captured[0][-1]['content']
     assert 'worker-2' in captured[0][-1]['content']
     assert json.loads(job['context'])['uid']=='old-uid'

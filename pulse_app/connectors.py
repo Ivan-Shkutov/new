@@ -21,6 +21,16 @@ class ConnectorError(ValueError):
     """Safe operator-facing integration failure."""
 
 
+class Completion(str):
+    """Text-compatible answer with bounded, non-sensitive inference metadata."""
+    def __new__(cls, value, *, finish_reason='stop', usage=None):
+        obj=super().__new__(cls,value)
+        obj.metadata={'finish_reason':finish_reason}
+        if isinstance(usage,dict):
+            obj.metadata['usage']={k:v for k,v in usage.items() if k in ('prompt_tokens','completion_tokens','total_tokens') and type(v) is int and v>=0}
+        return obj
+
+
 RESOURCE_PATHS = {
     "nodes": "/api/v1/nodes", "pods": "/api/v1/pods", "namespaces": "/api/v1/namespaces",
     "services": "/api/v1/services", "endpoints": "/api/v1/endpoints",
@@ -180,6 +190,8 @@ def _request(client, method, url, *, as_json=True, deadline=None, **kwargs):
         if not as_json:
             return body.decode("utf-8", errors="replace")
         return json.loads(body)
+    except httpx.TimeoutException:
+        raise ConnectorError("Upstream timeout; время ожидания источника истекло") from None
     except httpx.HTTPError:
         raise ConnectorError("Upstream network/TLS request failed; check endpoint, trust and connectivity") from None
     except (ValueError, UnicodeError) as exc:
@@ -492,6 +504,8 @@ def astra_logs(settings: dict, namespace: str, pod: str, start: str | None = Non
 
 
 def llm_chat(settings: dict, messages: list) -> str:
+    from .ai_limits import limits
+    budget = limits(settings)
     if not isinstance(messages, list) or not messages or len(messages) > 60:
         raise ConnectorError("Invalid LLM conversation")
     clean = []
@@ -499,7 +513,7 @@ def llm_chat(settings: dict, messages: list) -> str:
         if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
             raise ConnectorError("Unsupported LLM message")
         clean.append({"role": message["role"], "content": _text(message.get("content"), "message", 100000)})
-    if sum(len(m["content"]) for m in clean) > 150000:
+    if sum(len(m["content"]) for m in clean) > budget['max_context_chars']:
         raise ConnectorError("LLM context exceeds the configured application limit")
     model = _text(settings.get("model"), "model", 200)
     if not model:
@@ -507,9 +521,9 @@ def llm_chat(settings: dict, messages: list) -> str:
     base = _url(settings.get("url"))
     if not base.endswith("/v1"):
         base += "/v1"
-    with _client(settings, timeout=httpx.Timeout(180, connect=10)) as client:
-        response = _request(client, "POST", base + "/chat/completions", json={
-            "model": model, "messages": clean, "max_tokens": 6000, "temperature": 0.1,
+    with _client(settings, timeout=httpx.Timeout(budget['timeout_seconds'], connect=10)) as client:
+        response = _request(client, "POST", base + "/chat/completions", deadline=time.monotonic()+budget['timeout_seconds'], json={
+            "model": model, "messages": clean, "max_tokens": budget['max_tokens'], "temperature": budget['temperature'],
             "stream": False,
         })
     try:
@@ -519,7 +533,7 @@ def llm_chat(settings: dict, messages: list) -> str:
     except (KeyError, IndexError, TypeError):
         raise ConnectorError("LLM returned an unsupported completion response") from None
     if not isinstance(result, str) or not result.strip():
-        if message.get('reasoning_content'):
+        if message.get('reasoning_content') or message.get('reasoning'):
             raise ConnectorError('Local LLM returned reasoning_content but no text answer; check the model chat template, thinking mode and output budget')
         raise ConnectorError("LLM returned no text; tools and autonomous actions are not enabled")
     if message.get('tool_calls') or message.get('function_call'):
@@ -536,7 +550,7 @@ def llm_chat(settings: dict, messages: list) -> str:
     if choice.get('finish_reason')!='stop':
         from .astra_ai import IncompleteAnswer
         raise IncompleteAnswer('Локальная модель не подтвердила завершение ответа: '+str(choice.get('finish_reason'))[:40],result)
-    return redact_sensitive_text(result)
+    return Completion(redact_sensitive_text(result),usage=response.get('usage'))
 
 
 # Ratios are computed by the source across series, never by averaging node percentages.
@@ -652,15 +666,20 @@ def dashboard_metrics(settings, window='1h'):
 def holmes_chat(settings, messages):
     """HolmesGPT 0.45.0 /api/chat contract; no silent fallback to a different engine."""
     ask = messages[-1]['content']
-    with _client(settings, timeout=httpx.Timeout(180,connect=10)) as client:
-        info=_request(client,'GET',_url(settings.get('url'))+'/api/info',params={'detail':'full'})
+    from .ai_limits import limits
+    budget = limits(settings, agent=True)
+    deadline=time.monotonic()+budget['timeout_seconds']
+    with _client(settings, timeout=httpx.Timeout(budget['timeout_seconds'],connect=10)) as client:
+        info=_request(client,'GET',_url(settings.get('url'))+'/api/info',params={'detail':'full'},deadline=deadline,timeout=httpx.Timeout(min(15,budget['timeout_seconds']),connect=10))
         if not isinstance(info,dict) or not isinstance(info.get('toolsets'),list) or info.get('auth_enabled') is not True or any(not isinstance(t,dict) or not isinstance(t.get('name'),str) for t in info['toolsets']):
             raise ConnectorError('Holmes не подтвердил защищённый контракт /api/info?detail=full')
         active={t.get('name') for t in info['toolsets'] if t.get('enabled') or t.get('status')=='enabled'}
         ready=any(t.get('name')=='pulse-readonly' and t.get('enabled') is True and t.get('status')=='enabled' for t in info['toolsets'])
         if not ready or active-{'pulse-readonly','skills'}:
             raise ConnectorError('Holmes tools не прошли проверку: разрешены только pulse-readonly и skills')
-        data = _request(client,'POST',_url(settings.get('url'))+'/api/chat',json={
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise ConnectorError('Holmes timeout; бюджет времени исчерпан до запроса модели')
+        data = _request(client,'POST',_url(settings.get('url'))+'/api/chat',deadline=deadline,timeout=httpx.Timeout(remaining,connect=min(10,remaining)),json={
             'ask':ask,'model':settings.get('model') or None,'stream':False,
             'additional_system_prompt':messages[0]['content'],
             'conversation_history':[m for m in messages[1:-1] if m['role'] in ('user','assistant')],

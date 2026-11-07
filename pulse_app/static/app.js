@@ -4,7 +4,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {page: 'overview', cluster: '', clusters: [], snapshot: null, overview: [], editingCluster: null, logs: null, resolving: null, previousId: null, loadSequence: 0, pollBusy: false};
 try { state.cluster = localStorage.getItem('pulse.cluster') || ''; } catch (_) { /* Storage can be unavailable in private browser contexts. */ }
-const titles = {overview: 'Обзор кластеров', resources: 'Ресурсы Kubernetes', diagnostics: 'Диагностика проблемы', investigations: 'Архив расследований', knowledge: 'База знаний', settings: 'Настройки', chat:'Чат с ИИ'};
+const titles = {overview: 'Обзор кластеров', resources: 'Ресурсы Kubernetes', investigations: 'Архив расследований', knowledge: 'База знаний', settings: 'Настройки', chat:'Чат с ИИ'};
 const typeNames = {pods: 'Pods', nodes: 'Nodes', namespaces: 'Namespaces'};
 
 function node(tag, className, text) {
@@ -63,7 +63,7 @@ function requireCluster() {
 function clusterPath(suffix = '') { return `/clusters/${encodeURIComponent(requireCluster())}${suffix}`; }
 function currentClusterName() { return state.clusters.find(item => item.id === state.cluster)?.name || state.cluster; }
 function setCluster(id) {
-  if (state.cluster !== id && typeof clearScenarioContext === 'function') clearScenarioContext();
+  if(state.cluster!==id&&$('#ai-dialog').open)$('#ai-dialog').close();
   state.cluster = id; state.snapshot = null; clearFollowup();
   try { localStorage.setItem('pulse.cluster', id); } catch (_) { /* Optional preference only. */ }
   $('#cluster-select').value = id;
@@ -79,7 +79,6 @@ async function loadClusters() {
 async function navigate() {
   const page = location.hash.slice(1) || 'overview',nextPage=Object.hasOwn(titles,page)?page:'overview';
   if(state.page!==nextPage&&$('#ai-dialog').open)$('#ai-dialog').close();
-  if(state.page==='diagnostics'&&nextPage!=='diagnostics'&&typeof clearScenarioContext==='function')clearScenarioContext();
   state.page = nextPage;
   $$('.page').forEach(item => item.classList.toggle('hidden', item.id !== `page-${state.page}`));
   $$('#navigation a').forEach(item => { const active = item.dataset.page === state.page; item.classList.toggle('active', active); if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
@@ -92,7 +91,6 @@ async function loadPage() {
   try {
     if (state.page === 'overview') await loadOverview();
     else if (state.page === 'resources') await loadResources();
-    else if (state.page === 'diagnostics') await loadDiagnostics();
     else if (state.page === 'investigations') await loadInvestigations();
     else if (state.page === 'knowledge') await loadKnowledge();
     else if (state.page === 'settings') await loadSettings();
@@ -167,11 +165,11 @@ async function openMetricDetail(metric){const cid=selectedMetricCluster();if(!ci
  const load=async()=>{loading(target);try{const data=await api(`/clusters/${encodeURIComponent(cid)}/metrics-detail?metric=${metric}&window=${range.value}`);clear(target);target.append(controls);const holder=node('div','detail-metric-chart');renderDashboardMetrics(holder,{...data.summary,metrics:{[metric]:data.summary.metrics?.[metric]}},false);holder.querySelectorAll('.utilization-card').forEach(card=>{if(!card.dataset.metric||card.dataset.metric===metric)return;card.remove();});target.append(holder);target.append(node('h3','','Детализация по узлам и workloads'));
  for(const [name,payload] of Object.entries(data.series||{})){const section=node('section','series-section');section.append(node('h3','',`${name} · ${data.units?.[name]||''}`));if(payload.error)notice(section,payload.error,'warning');const rows=payload.data?.result||[];if(!rows.length)notice(section,'Серий нет: проверьте exporter и labels.');const table=node('table');table.append(append(node('thead'),append(node('tr'),node('th','','Метки источника'),node('th','','Значение'),node('th','','Время'))));const body=node('tbody');for(const row of rows.slice(0,500))body.append(append(node('tr'),node('td','',Object.entries(row.metric||{}).filter(([k])=>k!=='__name__').map(([k,v])=>`${k}=${v}`).join(' · ')),node('td','',metricValue(row.value?.[1],data.units?.[name])),node('td','',row.value?date(row.value[0]*1000):'—')));table.append(body);section.append(append(node('div','table-wrap'),table));if(rows.length>500)notice(section,'Показаны первые 500 серий. Уточните scope источника.','warning');target.append(section);}
  }catch(e){notice(clear(target),errorText(e),'error');}};
- controls.append(range,seriesSearch,button('✧ Диагностика',()=>openAnalysis({cluster_id:cid,metric,title:`Утилизация ${metric.toUpperCase()}`})));range.addEventListener('change',load);await load();}
+ controls.append(range,seriesSearch,button('✧ Анализ ИИ',()=>openAnalysis({cluster_id:cid,metric,title:`Утилизация ${metric.toUpperCase()}`})));range.addEventListener('change',load);await load();}
 async function loadProblemTable(board){const request=++problemRequest;const list=$('.problem-table-body',board),count=$('.problem-count',board),pager=$('.problem-pager',board);if(!list)return;
  const params=new URLSearchParams({cluster_id:state.cluster,severity:problemSeverity,q:problemQuery,offset:problemOffset,limit:25});
  try{const result=await api('/problems?'+params);if(!board.isConnected||request!==problemRequest)return;clear(list);count.textContent=`${result.total}`;
- for(const item of result.items){const tr=node('tr',`problem-${item.severity}${item.stale?' historical':''}`);const ai=button('✧',()=>openAnalysis(item),'secondary ai-spark');ai.setAttribute('aria-label',`Диагностика: ${item.name}`);ai.title='Открыть диагностику';tr.append(append(node('td'),ai),append(node('td'),node('span',`severity-dot ${item.severity}`),node('span','',item.severity==='critical'?'Критично':'Внимание')),append(node('td'),Object.assign(node('strong','',item.phase==='Failed'?`${item.reason||'Failed'} · завершённый Pod`:item.title),{title:item.title}),Object.assign(node('small','metadata',item.detail),{title:item.detail})),append(node('td'),button(item.name,()=>openResourceDetail(item.kind,item.name,item.cluster_id,item.namespace),'secondary small')),node('td','',`${item.cluster_name} / ${item.namespace||item.kind}`),node('td','',item.stale?'Старый снимок':date(item.observed_at)));list.append(tr);}
+ for(const item of result.items){const tr=node('tr',`problem-${item.severity}${item.stale?' historical':''}`);const ai=button('✧',()=>openAnalysis(item),'secondary ai-spark');ai.setAttribute('aria-label',`Анализ: ${item.name}`);ai.title='Открыть анализ ИИ';tr.append(append(node('td'),ai),append(node('td'),node('span',`severity-dot ${item.severity}`),node('span','',item.severity==='critical'?'Критично':'Внимание')),append(node('td'),Object.assign(node('strong','',item.phase==='Failed'?`${item.reason||'Failed'} · завершённый Pod`:item.title),{title:item.title}),Object.assign(node('small','metadata',item.detail),{title:item.detail})),append(node('td'),button(item.name,()=>openResourceDetail(item.kind,item.name,item.cluster_id,item.namespace),'secondary small')),node('td','',`${item.cluster_name} / ${item.namespace||item.kind}`),node('td','',item.stale?'Старый снимок':date(item.observed_at)));list.append(tr);}
  if(!result.items.length)list.append(append(node('tr'),Object.assign(node('td','muted','Сигналов по выбранному фильтру нет'),{colSpan:6})));
  clear(pager);const prev=button('←',()=>{problemOffset=Math.max(0,problemOffset-25);loadProblemTable(board);});prev.disabled=problemOffset===0;const next=button('→',()=>{problemOffset+=25;loadProblemTable(board);});next.disabled=problemOffset+25>=result.total;pager.append(node('span','muted',`${result.total?problemOffset+1:0}–${Math.min(problemOffset+25,result.total)} из ${result.total}`),prev,next);const coverage=$('.problem-coverage',board);coverage.textContent=result.coverage.some(c=>c.incomplete||c.stale||!c.enabled)?'Есть неполные / устаревшие источники':'По доступным Kubernetes-наблюдениям';
  }catch(e){clear(list).append(append(node('tr'),Object.assign(node('td','critical-text',errorText(e)),{colSpan:6})));}}
@@ -273,7 +271,7 @@ function renderResources() {
     const row = node('tr'); row.append(node('td', 'resource-name', item.metadata?.name || '—'), node('td', '', item.metadata?.namespace || '—'), node('td', '', resourceStatus(item, type)));
     const actions = node('div', 'table-actions');
     actions.append(button('JSON', () => { $('#object-title').textContent = item.metadata?.name || type; $('#object-json').textContent = JSON.stringify(item, null, 2); $('#object-dialog').showModal(); }));
-    if (type === 'pods') actions.append(button('Логи', () => openLogs(item)), button('Диагностика', () => openAnalysis({cluster_id:state.cluster,cluster_name:currentClusterName(),namespace:item.metadata?.namespace||'',name:item.metadata?.name||'',uid:item.metadata?.uid||'',kind:'pods',title:resourceStatus(item,type)})));
+    if (type === 'pods') actions.append(button('Логи', () => openLogs(item)), button('✧ Анализ', () => openAnalysis({cluster_id:state.cluster,cluster_name:currentClusterName(),namespace:item.metadata?.namespace||'',name:item.metadata?.name||'',uid:item.metadata?.uid||'',kind:'pods',title:resourceStatus(item,type)})));
     row.append(append(node('td'), actions)); tbody.append(row);
   }); table.append(tbody); target.append(append(node('div', 'table-wrap'), table));
 }
@@ -310,7 +308,7 @@ async function loadInvestigations() {
   if (!state.cluster) { target.append(empty('Выберите кластер', 'Контекст расследования ограничивается выбранным кластером.')); return; }
   const selected = state.cluster, data = await api(`/investigations?cluster_id=${encodeURIComponent(selected)}`);
   if (state.cluster !== selected) return;
-  if (!(data.items || []).length) { target.append(empty('Архив пуст', 'Новые проверки доступны в разделе «Диагностика».', button('Открыть диагностику',()=>{location.hash='diagnostics';}))); return; }
+  if (!(data.items || []).length) { target.append(empty('Архив пуст', 'Новый анализ открывается кнопкой ИИ в Обзоре.', button('Открыть Обзор',()=>{location.hash='overview';}))); return; }
   (data.items || []).forEach(item => {
     const card = node('article', 'item-card'); card.dataset.testid = 'investigation'; card.dataset.status = item.status;
     card.append(append(node('div', 'section-heading'), node('h3', '', item.question), statusChip(item.status)));
@@ -342,7 +340,8 @@ async function loadKnowledge(query = '') {
 }
 async function loadSettings() {
   const settings = await api('/settings'); const form = $('#llm-form');
-  form.elements.url.value = settings.llm?.url || ''; form.elements.model.value = settings.llm?.model || ''; form.elements.api_key.value = '';
+  form.elements.url.value = settings.llm?.url || ''; form.elements.model.value = settings.llm?.model || '';
+  for(const key of ['max_tokens','timeout_seconds'])form.elements[key].value=settings.llm?.[key]||({max_tokens:8192,timeout_seconds:300}[key]); form.elements.api_key.value = '';
   $('#llm-key-state').textContent = settings.llm?.has_key ? 'API key уже сохранён. Значение не возвращается в браузер.' : 'API key не задан. Для локального сервера без авторизации он не требуется.';
   await loadClusters(); const target = clear('#cluster-settings-list');
   if (!state.clusters.length) { target.append(node('p', 'muted', 'Подключений пока нет.')); return; }
@@ -359,7 +358,7 @@ function openCluster(cluster = null) {
   form.elements.id.value = cluster?.id || ''; form.elements.id.disabled = !!cluster;
   form.elements.name.value = cluster?.name || ''; form.elements.enabled.checked = cluster ? !!cluster.enabled : true;
   form.elements.kubeconfig.required = !cluster;
-  form.elements.holmes_enabled.checked=!!cluster?.holmes?.enabled;form.elements.holmes_url.value=cluster?.holmes?.url||'';form.elements.holmes_model.value=cluster?.holmes?.model||'pulse-local';$('#holmes-message').textContent='';$('#holmes-bootstrap').disabled=!cluster;$('#holmes-test').disabled=!cluster;$('#holmes-accept').disabled=!cluster;
+  form.elements.holmes_enabled.checked=!!cluster?.holmes?.enabled;form.elements.holmes_url.value=cluster?.holmes?.url||'';form.elements.holmes_model.value=cluster?.holmes?.model||'pulse-local';form.elements.holmes_timeout.value=cluster?.holmes?.timeout_seconds||600;form.elements.holmes_steps.value=cluster?.holmes?.max_steps||8;form.elements.holmes_tokens.value=cluster?.holmes?.max_tokens||4096;form.elements.holmes_request_timeout.value=cluster?.holmes?.model_timeout_seconds||180;$('#holmes-refresh').disabled=!cluster;$('#holmes-message').textContent='';$('#holmes-bootstrap').disabled=!cluster;$('#holmes-test').disabled=!cluster;$('#holmes-accept').disabled=!cluster;
   form.elements.astra_ai_enabled.checked=!!cluster?.astra_ai?.enabled;form.elements.astra_ai_url.value=cluster?.astra_ai?.url||'';form.elements.astra_ai_model.value=cluster?.astra_ai?.model||'qwen';$('#astra-ai-state').textContent=cluster?.astra_ai?.has_key?'Токен сохранён. Значение не возвращается.':'Токен не сохранён.';$('#astra-ai-message').textContent='';$('#astra-ai-test').disabled=!cluster;
   const metrics=cluster?.metrics||{};form.elements.metrics_transport.value=metrics.transport||'direct';for(const key of ['url','namespace','service','port','mode'])if(metrics[key]!=null)form.elements['metrics_'+key].value=metrics[key];form.elements.metrics_labels.value=metrics.labels?JSON.stringify(metrics.labels):'';$('#metrics-message').textContent='';clear('#metrics-candidates').append(new Option('Выберите после поиска',''));$('#metrics-discover').disabled=!cluster;$('#metrics-test').disabled=!cluster;
   const astra=cluster?.astra||{};for(const key of ['url','cluster_field','cluster_value','namespace_field','pod_field'])if(astra[key]!=null)form.elements['astra_'+key].value=astra[key];
@@ -404,7 +403,7 @@ $('#cluster-form').addEventListener('submit', event => {
       if (form.elements.kubeconfig.value.trim()) body.kubeconfig = form.elements.kubeconfig.value.trim();
       const metrics = integrationSettings(form, 'metrics'), astra = integrationSettings(form, 'astra');
       if (metrics) body.metrics = metrics; if (astra) body.astra = astra;
-      body.holmes={enabled:form.elements.holmes_enabled.checked,url:form.elements.holmes_url.value.trim(),model:form.elements.holmes_model.value.trim()};if(form.elements.holmes_api_key.value)body.holmes.api_key=form.elements.holmes_api_key.value;
+      body.holmes={enabled:form.elements.holmes_enabled.checked,url:form.elements.holmes_url.value.trim(),model:form.elements.holmes_model.value.trim(),timeout_seconds:Number(form.elements.holmes_timeout.value)};if(form.elements.holmes_api_key.value)body.holmes.api_key=form.elements.holmes_api_key.value;
       body.astra_ai={enabled:form.elements.astra_ai_enabled.checked,url:form.elements.astra_ai_url.value.trim(),model:form.elements.astra_ai_model.value.trim()};if(form.elements.astra_ai_api_key.value)body.astra_ai.api_key=form.elements.astra_ai_api_key.value;
       if(body.holmes.enabled&&(!body.holmes.url||!body.holmes.model))throw new Error('Для Holmes нужны URL и model alias');
       const saved=await api(state.editingCluster ? `/clusters/${encodeURIComponent(state.editingCluster)}` : '/clusters', {method: state.editingCluster ? 'PUT' : 'POST', body});
@@ -416,7 +415,7 @@ $('#cluster-form').addEventListener('submit', event => {
 });
 $('#llm-form').addEventListener('submit', event => {
   event.preventDefault(); const form = event.currentTarget;
-  busy($('[type=submit]', form), async () => { try { const llm = {url: form.elements.url.value.trim(), model: form.elements.model.value.trim()}; if (form.elements.api_key.value) llm.api_key = form.elements.api_key.value; await api('/settings', {method: 'PUT', body: {llm}}); form.elements.api_key.value = ''; message(form, 'Настройки сохранены.', true); } catch (error) { message(form, errorText(error)); } });
+  busy($('[type=submit]', form), async () => { try { const llm = {url: form.elements.url.value.trim(), model: form.elements.model.value.trim(), max_tokens:Number(form.elements.max_tokens.value),timeout_seconds:Number(form.elements.timeout_seconds.value)}; if (form.elements.api_key.value) llm.api_key = form.elements.api_key.value; await api('/settings', {method: 'PUT', body: {llm}}); form.elements.api_key.value = ''; message(form, 'Настройки сохранены.', true); } catch (error) { message(form, errorText(error)); } });
 });
 $('#test-llm').addEventListener('click', event => busy(event.currentTarget, async () => { const form = $('#llm-form'); message(form, 'Проверяем сохранённые настройки…', true); try { const result = await api('/settings/test', {method: 'POST'}); message(form, result.ok ? `Модель ответила: ${result.answer || 'OK'}` : result.error || 'Проверка не пройдена.', !!result.ok); } catch (error) { message(form, errorText(error)); } }));
 $('#logs-form').addEventListener('submit', event => {
@@ -513,7 +512,7 @@ function showAnalysisJobs(jobs){
   turn.append(node('div','chat-question',job.question));
   const failed=job.status==='failed',draft=failed?parts.body:'';
   if(job.answer&&!job.error&&job.status!=='done')notice(turn,['queued','running'].includes(job.status)?'Анализ продолжается…':'Ответ модели не завершён.','warning');
-  if(job.error)notice(turn,/Astra AI HTTP (401|403)/.test(job.error)?'Astra AI: доступ отклонён. Проверьте токен и права.':'Ответ ИИ не завершён. Подробности ошибки — в источниках.','error');
+  if(job.error)notice(turn,job.error,'error');
   if(parts.body&&!failed)turn.append(safeAnswer(parts.body));
   else if(parts.facts){
    turn.append(node('p','analysis-fallback-label','Кратко по данным Pulse'),safeAnswer(conciseFacts(evidence)));
@@ -525,7 +524,7 @@ function showAnalysisJobs(jobs){
     button('Повторить через локальную LLM',async()=>{const mode=$('#ai-form').elements.analysis_mode.value;await openAnalysis({...context,engine:'local'});if(analysisState?.session){const form=$('#ai-form');form.elements.question.value=job.question;form.elements.analysis_mode.value=mode;form.requestSubmit();}}),
     button('Настроить Astra AI',()=>{const cluster=state.clusters.find(c=>c.id===context.cluster_id);$('#ai-dialog').close();if(cluster){openCluster(cluster);$('#cluster-form').elements.astra_ai_url.closest('details').open=true;}})));
   }
-  if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты и готовим ответ…'));
+  if(['queued','running'].includes(job.status))turn.append(node('p','muted',job.status==='queued'?'В очереди…':'Собираем факты, ищем документацию и готовим ответ…'));
   const review=Array.isArray(trace)?trace.find(t=>t.tool==='answer-review'):null;
   if(review?.warnings?.length)notice(turn,'Вывод модели требует проверки. Замечания — в источниках.','warning');
   if(parts.facts||evidence.records||trace?.length||job.error||draft){
@@ -537,7 +536,7 @@ function showAnalysisJobs(jobs){
    if(review?.warnings?.length)notice(sources,'Проверка ответа: '+review.warnings.join(' '),'warning');
    if(missing.length)notice(sources,`Недоступные проверки: ${missing.map(r=>r.check).join('; ')}. Их результат не получен.`,'warning');
    if(partial.length)notice(sources,`Неполные проверки: ${partial.map(r=>r.check).join('; ')}. Получена часть данных; отсутствие других ошибок не доказано.`,'warning');
-   if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace)details.append(node('div','',`${item.tool} · ${item.status}`));sources.append(details);}
+   if(Array.isArray(trace)&&trace.length){const details=node('details','chat-trace');details.append(node('summary','','Источники, skills и инструменты'));for(const item of trace){details.append(node('div','',`${item.tool} · ${item.status}${item.code?' · '+item.code:''}${item.elapsed_seconds!=null?' · '+item.elapsed_seconds+' с':''}`));if(item.documents)for(const doc of item.documents)details.append(node('p','',`${doc.id} · ${doc.name} · ${doc.product||''} ${doc.version||''} · ${doc.source||''}`));}sources.append(details);}
    if(evidence.records)showEvidence(sources,evidence);
    else if(!analysisState?.context?.chat)sources.append(button('Журнал проверок',async()=>{try{const full=await api(analysisState?.session?`/sessions/${analysisState.session}/jobs/${encodeURIComponent(job.id)}`:'/investigations/'+encodeURIComponent(job.id));const report=readJson(full.evidence,{});if(report.records)showEvidence(sources,report);else toast('Для прежнего задания журнал не сохранён');}catch(e){toast(errorText(e));}},'secondary small'));
    turn.append(sources);
@@ -554,19 +553,18 @@ function forgetAnalysis(){
  if(sid)fetch(`/api/sessions/${encodeURIComponent(sid)}`,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});
 }
 async function openAnalysis(context){
- if(!context.chat)return openScenario(context);
  forgetAnalysis();const sequence=++analysisSequence;
  analysisState={context,session:null,previous:null,jobs:[]};
  const engine=context.engine||(context.chat?$('#chat-engine').value:'cluster');$('#analysis-engine').value=engine;
  const selected=state.clusters.find(c=>c.id===context.cluster_id);$('#analysis-engine option[value=cluster]').textContent=selected?.astra_ai?.enabled?'Astra AI · '+selected.astra_ai.model:selected?.holmes?.enabled?'HolmesGPT':'Настройки кластера · локальная LLM';
  $('#analysis-engine-tools').classList.toggle('hidden',!!context.chat);
- $('#ai-title').textContent=context.chat?'✧ Чат с ИИ':'✧ Анализ проблемы';
+ $('#ai-title').textContent=context.chat?'✧ Чат с ИИ':'✧ Анализ';
  $('#ai-context').textContent=context.chat?`${context.cluster_id&&$('#chat-engine').value==='cluster'?'Движок выбранного кластера: '+context.cluster_id:'Локальная модель напрямую'} · временный диалог. Закрытие удалит переписку из Pulse.`:`${context.cluster_name||context.cluster_id} · ${context.namespace||context.kind||context.metric||'кластер'} · ${context.name||context.title||''}\n${context.title||''} · без сохранения истории`;
  $('#ai-form .ai-presets').classList.toggle('hidden',!!context.chat);
- $('#ai-form').elements.analysis_mode.value=context.chat?'extended':'brief';
- $('#ai-form textarea').placeholder=context.chat?'Задайте любой вопрос…':'В чём причина и что проверить первым?';
+ $('#ai-form').elements.analysis_mode.value='extended';
+ $('#ai-form textarea').placeholder=context.chat?'Спросить…':'Спросить об инциденте…';
  $('#ai-form button[type=submit]').disabled=true;
- clear('#ai-conversation').append(node('p','muted',context.chat?'Новый диалог. Можно задать любой вопрос.':'Новый анализ. ИИ получит контекст выбранной проблемы и доступные доказательства.'));
+ clear('#ai-conversation');
  if(!$('#ai-dialog').open)$('#ai-dialog').showModal();
  try{const result=await api('/sessions',{method:'POST',body:{cluster_id:context.cluster_id||'',mode:context.chat?'chat':'problem',engine}});
   if(sequence!==analysisSequence){fetch('/api/sessions/'+result.id,{method:'DELETE',headers:{'X-Pulse-Request':'1'},credentials:'same-origin',keepalive:true}).catch(()=>{});return;}
@@ -604,14 +602,14 @@ $('#ai-form').addEventListener('submit',async event=>{
  event.preventDefault();if(!analysisState?.session)return;
  const sequence=analysisSequence,context=analysisState.context,sid=analysisState.session;
  const body={question:event.currentTarget.elements.question.value.trim(),mode:event.currentTarget.elements.analysis_mode.value};
- if(context.id&&!analysisState.jobs.length)body.problem_id=context.id;if(context.metric)body.metric=context.metric;
+ if(!analysisState.jobs.length){if(context.id)body.problem_id=context.id;else if(context.metric)body.metric=context.metric;else if(context.namespace&&(context.kind==='pods'||context.pod)&&context.uid){body.namespace=context.namespace;body.pod=context.pod||context.name;body.uid=context.uid;}}
  $('#ai-form button[type=submit]').disabled=true;
  try{const job=await api(`/sessions/${sid}/messages`,{method:'POST',body});if(sequence!==analysisSequence)return;
   $('#ai-form textarea').value='';analysisState.followLatest=true;await pollAnalysis(job.id,sequence);
  }catch(e){if(sequence===analysisSequence){$('#ai-status').textContent=errorText(e);$('#ai-form button[type=submit]').disabled=false;}}
 });
 
-$('#holmes-bootstrap').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');try{const port=Number($('#cluster-form').elements.holmes_port.value);const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-bootstrap`,{method:'POST',body:{port}});out.textContent=`Создан runtime/${result.relative_path}. Запустите compose этого каталога на сервере. Затем заново откройте настройки кластера и проверьте ответ Holmes.`;await loadClusters();}catch(e){out.textContent=errorText(e);}}));
+$('#holmes-bootstrap').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');try{const port=Number($('#cluster-form').elements.holmes_port.value);const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-bootstrap`,{method:'POST',body:{port,...holmesBudgetFields()}});out.textContent=`Создан runtime/${result.relative_path}. Запустите compose этого каталога на сервере. Затем заново откройте настройки кластера и проверьте ответ Holmes.`;await loadClusters();}catch(e){out.textContent=errorText(e);}}));
 $('#holmes-test').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');out.textContent='Проверяем сохранённое подключение…';try{const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-test`,{method:'POST'});out.textContent='Holmes ответил: '+result.answer;}catch(e){out.textContent=errorText(e);}}));
 
 $('#holmes-accept').addEventListener('click',event=>busy(event.currentTarget,async()=>{if(!state.editingCluster)return;const out=$('#holmes-message');out.textContent='Проверяем настоящий вызов инструмента…';try{const result=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/holmes-accept`,{method:'POST'});out.textContent=result.ok?'Инструмент вызван, непредсказуемый результат получен. Можно включить Holmes для кластера.':result.answer;}catch(e){out.textContent=errorText(e);}}));
@@ -627,7 +625,7 @@ let metricCandidates=[];
 $('#metrics-discover').addEventListener('click',event=>busy(event.currentTarget,async()=>{try{const data=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/metrics-discovery`);metricCandidates=data.items;const select=clear('#metrics-candidates');select.append(new Option('Выберите источник',''));metricCandidates.forEach((s,i)=>select.append(new Option(`${s.namespace}/${s.service}:${s.port}`,String(i))));$('#metrics-message').textContent=data.error||data.note+(data.items.length?'':' Сервисы пока не найдены в снимке. Выполните сбор.');}catch(e){$('#metrics-message').textContent=errorText(e);}}));
 $('#metrics-candidates').addEventListener('change',event=>{if(event.target.value==='')return;const source=metricCandidates[Number(event.target.value)],form=$('#cluster-form');form.elements.metrics_transport.value='kubernetes';for(const key of ['namespace','service','port'])form.elements['metrics_'+key].value=source[key];updateMetricsFields();$('#metrics-message').textContent='Источник выбран. Укажите scope (выделенный или labels), сохраните кластер и проверьте подключение.';});
 $('#metrics-test').addEventListener('click',event=>busy(event.currentTarget,async()=>{const out=$('#metrics-message');if(metricsFormFingerprint($('#cluster-form'))!==state.metricsFormInitial){out.textContent='Есть несохранённые изменения метрик. Нажмите «Сохранить кластер», затем откройте настройки и повторите проверку.';return;}out.textContent='Проверяем сохранённый источник…';try{const data=await api(`/clusters/${encodeURIComponent(state.editingCluster)}/metrics-test`,{method:'POST'});out.textContent=data.note+` · серий ${data.series}`;}catch(e){out.textContent=errorText(e);}}));
-$$('[data-analysis]').forEach(control=>control.addEventListener('click',()=>{if($('#ai-form button[type=submit]').disabled)return;const mode=control.dataset.analysis;if(mode==='about'){toast('Pulse собирает доказательства через read-only API; анализ выполняет выбранный движок: локальная LLM, Holmes или ИИ Astra. Выполненные проверки видны в журнале.');return;}const form=$('#ai-form');form.elements.analysis_mode.value=mode;form.elements.question.value={brief:'Кратко: что произошло, важность, подтверждённая причина или гипотеза?',extended:'Проведи подробное расследование этой проблемы по собранным доказательствам.',causes:'Установи причину этой проблемы и отдели доказанные факты от гипотез.',impact:'Каковы подтверждённые и возможные последствия этой проблемы?',commands:'Дай нужные команды для диагностики и условного исправления, с кратким пояснением каждой.'}[mode];form.requestSubmit();}));
+$$('[data-analysis]').forEach(control=>control.addEventListener('click',()=>{if($('#ai-form button[type=submit]').disabled)return;const mode=control.dataset.analysis;if(mode==='about'){const out=$('#ai-conversation');const turn=node('article','chat-turn');turn.append(node('div','chat-question','Об инструменте'),safeAnswer('Pulse собирает факты из Kubernetes, метрик и логов, ищет подходящую документацию и передаёт контекст выбранному ИИ. Ответ помогает расследовать инцидент; выполненные проверки и источники доступны под ответом. Команды исправления автоматически не выполняются.'));out.append(turn);out.scrollTop=out.scrollHeight;return;}const form=$('#ai-form');form.elements.analysis_mode.value=mode;form.elements.question.value={brief:'Кратко: что произошло, важность, подтверждённая причина или гипотеза?',extended:'Разбери инцидент: что произошло, анализ, причины, как исправить, последствия и профилактика. Опирайся на факты и найденную документацию.',causes:'Установи причину этой проблемы и отдели доказанные факты от гипотез.',impact:'Каковы подтверждённые и возможные последствия этой проблемы?',commands:'Что проверить и как исправить: дай единый последовательный план с ожидаемыми результатами, условиями применения и проверкой восстановления.'}[mode];form.requestSubmit();}));
 
 $('#cluster-form').elements.astra_ai_enabled.addEventListener('change',event=>{if(event.target.checked)$('#cluster-form').elements.holmes_enabled.checked=false;});
 $('#cluster-form').elements.holmes_enabled.addEventListener('change',event=>{if(event.target.checked)$('#cluster-form').elements.astra_ai_enabled.checked=false;});
@@ -671,6 +669,7 @@ async function loadVectorKnowledge(query=''){
  const target=clear('#vector-documents');
  try{
   const status=await api('/knowledge/status');$('#vector-status').textContent=status.configured?`${status.model} · Qdrant ${status.qdrant||'—'}`:'Qdrant не настроен';
+  const imports=await api('/knowledge/imports');if(imports.items.length){const report=node('details','analysis-sources');report.append(node('summary','','Импорт библиотеки · '+imports.items.length));for(const item of imports.items)report.append(node('p','',`${item.file||'Архив'} · ${item.status} · новых ${item.indexed||0} · без изменений ${item.unchanged||0} · пропущено ${item.skipped||0} · ошибок ${item.failed_count??item.failed?.length??0}${item.error?' · '+item.error:''}`));target.append(report);}
   if(!status.configured){notice(target,'Подключите локальные Qdrant и embeddings по инструкции Docker.');return;}
   if(query){const result=await api('/knowledge/search?'+new URLSearchParams({q:query,cluster_id:state.cluster}));notice(target,result.note);
    for(const d of result.items)target.append(append(node('article','item-card'),node('h3','',`${d.name} · ${d.product} ${d.version}`),node('small','metadata',d.source),node('p','',d.excerpt)));
@@ -720,3 +719,8 @@ async function openMetricSetup(cid=selectedMetricCluster()){
  let found=[];
  try{const data=await api(`/clusters/${encodeURIComponent(cid)}/metrics-discovery`);if(!panel.isConnected)return;found=data.items||[];clear(source);source.append(new Option(found.length?'Выберите источник':'Источники не найдены',''));found.forEach((v,i)=>source.append(new Option(`${v.namespace}/${v.service}:${v.port}`,String(i))));if(found.length===1)source.value='0';save.disabled=!found.length;if(data.error)notice(report,'Поиск: '+data.error+(data.cached?' · показан прежний снимок сервисов':''),'warning');if(!found.length)notice(report,'Проверьте право list services и доступ к API. Для прямого URL используйте полные настройки.','warning');}catch(e){if(panel.isConnected)notice(report,errorText(e),'error');}
 }
+
+$('#ai-form textarea').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();if(!$('#ai-form button[type=submit]').disabled)$('#ai-form').requestSubmit();}});
+$('#holmes-refresh').addEventListener('click',event=>busy(event.currentTarget,async()=>{const cid=state.editingCluster;if(!cid)return;const out=$('#holmes-message');try{const result=await api(`/clusters/${encodeURIComponent(cid)}/holmes-refresh`,{method:'POST',body:holmesBudgetFields()});await loadClusters();if(state.editingCluster===cid)out.textContent=result.note+' Backup: runtime/'+result.backup;}catch(error){if(state.editingCluster===cid)out.textContent=errorText(error);}}));
+
+function holmesBudgetFields(){const form=$('#cluster-form');return {max_steps:Number(form.elements.holmes_steps.value),max_tokens:Number(form.elements.holmes_tokens.value),timeout_seconds:Number(form.elements.holmes_request_timeout.value)};}

@@ -14,6 +14,8 @@ class IncompleteAnswer(c.ConnectorError):
 
 
 def chat(settings, messages, progress=None):
+    from .ai_limits import limits
+    budget=limits(settings)
     # A value copied from DevTools often includes the header scheme. Normalize
     # only this adapter, including already saved values, without logging it.
     settings=dict(settings)
@@ -32,10 +34,10 @@ def chat(settings, messages, progress=None):
     for message in messages:
         if not isinstance(message,dict) or message.get('role') not in ('system','user','assistant'):raise c.ConnectorError('Неподдерживаемая роль чата')
         clean.append({'role':message['role'],'content':c._text(message.get('content'),'message',100000)})
-    if not clean or len(clean)>60 or sum(len(m['content']) for m in clean)>150000:
+    if not clean or len(clean)>60 or sum(len(m['content']) for m in clean)>budget['max_context_chars']:
         raise c.ConnectorError('Контекст Astra AI превышает лимит')
-    parts=[];done=False;finished=False;data=[];event='message';size=0;buffer='';count=0;published=0
-    deadline=time.monotonic()+180
+    parts=[];done=False;finished=False;data=[];event='message';size=0;buffer='';count=0;published=0;usage={}
+    deadline=time.monotonic()+budget['timeout_seconds']
     decoder=codecs.getincrementaldecoder('utf-8')('strict')
     def publish(force=False):
         nonlocal published
@@ -52,6 +54,7 @@ def chat(settings, messages, progress=None):
         try:item=json.loads(payload)
         except ValueError:raise c.ConnectorError('Astra AI вернула некорректное SSE-событие') from None
         if not isinstance(item,dict) or item.get('error'):raise c.ConnectorError('Astra AI вернула ошибку вместо ответа')
+        if isinstance(item.get('usage'),dict):usage.update(item['usage'])
         choices=item.get('choices')
         if choices==[] and item.get('usage') is not None:return
         if not isinstance(choices,list) or len(choices)!=1 or not isinstance(choices[0],dict):
@@ -81,8 +84,12 @@ def chat(settings, messages, progress=None):
         if field=='data':data.append(value)
         elif field=='event':event=value
     try:
-        with c._client(settings,timeout=httpx.Timeout(45,connect=10)) as client:
-            with client.stream('POST',url,json={'model':model,'stream':True,'messages':clean},headers={'Accept':'text/event-stream'}) as response:
+        payload={'model':model,'stream':True,'messages':clean}
+        # The observed Astra contract only guarantees these three fields.
+        # Send a generation budget only when explicitly configured for that API.
+        if 'max_tokens' in settings:payload['max_tokens']=budget['max_tokens']
+        with c._client(settings,timeout=httpx.Timeout(min(120,budget['timeout_seconds']),connect=10)) as client:
+            with client.stream('POST',url,json=payload,headers={'Accept':'text/event-stream'}) as response:
                 if response.status_code!=200:
                     hint={401:'Astra отклонила авторизацию. Обновите Bearer token именно Astra AI в настройках кластера и проверьте поток. Токен логов Astra и токен Kubernetes — отдельные подключения; причина 401 может быть в истёкшем или неподходящем токене.',
                           403:'Astra запретила доступ к AI endpoint. Проверьте права учётной записи в Astra.'}.get(response.status_code,'Проверьте выбранный AI endpoint.')
@@ -108,7 +115,7 @@ def chat(settings, messages, progress=None):
         answer=''.join(parts)
         if not answer.strip():raise c.ConnectorError('Astra AI не вернула текст ответа')
         publish(True)
-        return c.redact_sensitive_text(answer)
+        return c.Completion(c.redact_sensitive_text(answer),usage=usage)
     except (httpx.HTTPError,UnicodeError,c.ConnectorError) as exc:
         message=str(exc) if isinstance(exc,c.ConnectorError) else 'Обрыв или ошибка сети/TLS при чтении Astra AI'
         publish(True)

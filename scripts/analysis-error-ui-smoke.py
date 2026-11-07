@@ -37,8 +37,9 @@ class Handler(BaseHTTPRequestHandler):
   calls['local']+=1
   if len(body['messages'])>1:
    assert 'EmptyDir' in body['messages'][-1]['content'] and '1Gi' in body['messages'][-1]['content']
-  answer='UNTRUSTED-PARTIAL-DRAFT' if calls['invalid'] else json.dumps({'hypotheses':[],'checks':[{'title':'Уточнить рост временных файлов','detail':'Сопоставьте назначение тома data и правила ротации.','expected':'Источник роста подтверждён логами приложения.','evidence_ids':['E01']}]},ensure_ascii=False)
-  return self.respond({'choices':[{'message':{'content':answer},'finish_reason':'stop'}]})
+  answer='UNTRUSTED-PARTIAL-DRAFT' if calls['invalid'] else 'EmptyDir data превысил 1Gi [E01]. Источник роста файлов не установлен.'
+  return self.respond({'choices':[{'message':{'content':answer},'finish_reason':'length' if calls['invalid'] else 'stop'}]})
+
 with tempfile.TemporaryDirectory(prefix='pulse-analysis-tls-') as folder:
  root=Path(folder);key=rsa.generate_private_key(public_exponent=65537,key_size=2048);name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'Loopback test fixture')]);now=datetime.now(timezone.utc)
  cert=x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now-timedelta(minutes=1)).not_valid_after(now+timedelta(hours=1)).add_extension(x509.BasicConstraints(ca=True,path_length=None),True).add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),False).sign(key,hashes.SHA256())
@@ -55,50 +56,31 @@ with tempfile.TemporaryDirectory(prefix='pulse-analysis-tls-') as folder:
    created=context.request.post(a.base_url+'/api/clusters',data={'id':cid,'name':cid,'enabled':False,'kubeconfig':json.dumps(config),'astra_ai':{'enabled':True,'url':f'http://127.0.0.1:{model.server_port}/astra','model':'qwen-fixture','api_key':'fixture-rejected'}},headers=headers);assert created.status==201,created.text()
    try:
     Store(a.runtime).execute('INSERT INTO snapshots VALUES (?,?)',(cid,json.dumps({'observed_at':now.isoformat(),'complete':True,'resources':{'pods':{'items':[pod]}}})))
-    page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.goto(a.base_url);page.locator('#cluster-select').select_option(cid);page.get_by_role('button',name='Диагностика: bad',exact=True).click()
-    expect(page.locator('#scenario-result')).to_have_attribute('aria-busy','false',timeout=30000)
-    expect(page.locator('#scenario-status')).to_contain_text('ИИ не завершил',timeout=30000)
-    expect(page.locator('#scenario-result-body')).to_contain_text('EmptyDir')
-    assert page.locator('#ai-dialog').is_visible() is False and not calls['local']
-    assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-    page.locator('#scenario-sources>summary').click()
-    expect(page.locator('#scenario-sources')).to_contain_text('Astra AI HTTP 401')
-    expect(page.locator('#scenario-sources')).to_contain_text('неполные данные')
+    page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)));page.goto(a.base_url);page.locator('#cluster-select').select_option(cid);expect(page.locator('.cluster-caption')).to_have_text(cid);page.get_by_role('button',name='Анализ: bad',exact=True).click()
+    expect(page.locator('#ai-form [type=submit]')).to_be_enabled()
+    page.locator('[data-analysis=extended]').click()
+    expect(page.locator('#ai-status')).to_contain_text('Анализ не завершён',timeout=30000)
+    expect(page.locator('#ai-conversation')).to_contain_text('EmptyDir')
+    expect(page.locator('#ai-conversation .notice.error').first).to_contain_text('Astra AI HTTP 401')
     assert calls['astra']==1 and not calls['local']
-    # Deep profile additionally obtains container logs; 404 is visible as unavailable.
-    page.locator('[data-scenario=deep]').click()
-    expect(page.locator('#scenario-result')).to_have_attribute('aria-busy','false',timeout=30000)
-    assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-    page.locator('#scenario-sources>summary').click()
-    expect(page.locator('#scenario-sources')).to_contain_text('недоступно')
-    expect(page.locator('#scenario-sources')).to_contain_text('Логи контейнера')
-    assert calls['astra']==2 and not calls['local']
-    page.locator('#scenario-provider').select_option('local')
-    expect(page.locator('#scenario-result-body')).to_contain_text('Движок изменён')
-    page.locator('[data-scenario=brief]').click()
-    expect(page.locator('#scenario-result')).to_have_attribute('aria-busy','false',timeout=30000)
-    expect(page.locator('#scenario-status')).not_to_contain_text('ИИ не завершил')
-    expect(page.locator('#scenario-result-body')).to_contain_text('EmptyDir')
-    assert calls['local']==1 and calls['astra']==2
-    assert page.locator('#scenario-provider').input_value()=='local'
-    assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-    page.locator('#scenario-sources>summary').click()
-    expect(page.locator('#scenario-sources')).to_contain_text('Ответ ИИ завершён · формат проверен')
-    # Invalid model prose cannot enter the primary report or silently change provider.
-    calls['invalid']=True;page.locator('#scenario-rerun').click()
-    expect(page.locator('#scenario-result')).to_have_attribute('aria-busy','false',timeout=30000)
-    expect(page.locator('#scenario-status')).to_contain_text('ИИ не завершил')
-    expect(page.locator('#scenario-result-body')).to_contain_text('EmptyDir')
-    assert 'UNTRUSTED-PARTIAL-DRAFT' not in page.locator('#scenario-result').inner_text()
-    page.locator('#scenario-sources>summary').click()
-    expect(page.locator('#scenario-sources')).to_contain_text('Ответ ИИ не прошёл проверку формата')
-    assert calls['local']==2 and calls['astra']==2
+    assert not page.locator('.analysis-sources').evaluate('(e)=>e.open')
+    page.get_by_role('button',name='Повторить через локальную LLM',exact=True).click()
+    expect(page.locator('#ai-status')).to_contain_text('Ответ получен',timeout=30000)
+    expect(page.locator('.chat-answer')).to_contain_text('EmptyDir data превысил 1Gi')
+    assert calls['local']==1 and calls['astra']==1
+    assert page.locator('#analysis-engine').input_value()=='local'
+    calls['invalid']=True
+    page.locator('#ai-form textarea').fill('Что проверить дальше?')
+    page.locator('#ai-form [type=submit]').click()
+    expect(page.locator('#ai-status')).to_contain_text('Анализ не завершён',timeout=30000)
+    assert 'UNTRUSTED-PARTIAL-DRAFT' not in page.locator('.chat-answer').all_inner_texts()
     rows=context.request.get(a.base_url+'/api/clusters').json()['items'];assert next(r for r in rows if r['id']==cid)['astra_ai']['enabled']
-    page.screenshot(path='/tmp/pulse-0150-astra-local-scenarios.png',full_page=True)
-    page.get_by_role('link',name='Обзор',exact=True).click()
-    expect(page.locator('#scenario-result-body')).not_to_contain_text('EmptyDir')
+    page.screenshot(path='/tmp/pulse-0160-astra-local.png',full_page=True)
+    page.get_by_role('button',name='Закрыть анализ',exact=True).click()
+    expect(page.locator('#ai-conversation')).to_be_empty()
     assert not errors,errors
-    print('PASS: real API/TLS/browser; Astra 401 preserves EmptyDir facts, 404 logs and partial checks in closed sources; no silent fallback; explicit local scenario uses valid JSON; malformed model prose stays hidden; provider configuration unchanged; leaving clears context.')
+    print('PASS: actual API/TLS/browser; Astra 401 preserves facts, explicit local retry, complete text accepted, truncated draft hidden, no provider fallback or configuration mutation; close clears history.')
+
    finally:
     context.request.delete(a.base_url+'/api/clusters/'+cid,headers=headers);context.request.put(a.base_url+'/api/settings',data={'llm':{'url':before['url'],'model':before['model']}},headers=headers);browser.close()
  finally:

@@ -574,13 +574,17 @@ def emptydir_cause(report):
     return {'volume':match[1],'limit':match[2]} if match else None
 
 
-def review_answer(report,answer):
+def review_answer(report,answer,documents=None):
     """Flag observable omissions; this is not a semantic correctness guarantee."""
     warnings=[]
     refs=set(re.findall(r'\bE\d{2}\b',answer))
     known={r['id'] for r in report.get('records',[])}
     if known and not refs:warnings.append('Модель не сослалась на журнал E##; сверьте её утверждения с проверенными данными.')
     if refs-known:warnings.append('В ответе есть ссылки на отсутствующие проверки: '+', '.join(sorted(refs-known)))
+    if documents is not None:
+        doc_refs=set(re.findall(r'\bD\d{2}\b',answer))
+        known_docs={d['id'] for d in documents}
+        if doc_refs-known_docs:warnings.append('В ответе есть ссылки на отсутствующие документы: '+', '.join(sorted(doc_refs-known_docs)))
     cause=emptydir_cause(report)
     if cause and not all(x.casefold() in answer.casefold() for x in ('emptydir',cause['volume'],cause['limit'])):
         warnings.append('Модель не раскрыла подтверждённое превышение лимита EmptyDir '+cause['volume']+' '+cause['limit']+'. Смотрите проверенные данные Pulse.')

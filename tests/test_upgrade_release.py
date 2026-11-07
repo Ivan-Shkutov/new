@@ -62,6 +62,24 @@ def test_failed_new_release_restarts_previous_without_restore_or_init(tmp_path, 
     assert not any('restore' in c or 'init' in c for c in calls)
 
 
+def test_empty_precreated_backup_is_accepted_but_nonempty_is_not(tmp_path,monkeypatch):
+    _,_,_,calls,_=setup(tmp_path,monkeypatch)
+    backup=tmp_path/'backup';backup.mkdir()
+    assert upgrade.main(['--backup-dir',str(backup)])==0
+    calls.clear()
+    assert upgrade.main(['--backup-dir',str(backup)])==1
+    assert not any(c[-1]=='stop' for c in calls)
+
+
+def test_verified_upgrade_switches_current_link_and_rollback_restores_it(tmp_path,monkeypatch):
+    root,old,_,_,_=setup(tmp_path,monkeypatch)
+    link=tmp_path/'current';link.symlink_to(old)
+    backup=tmp_path/'backup'
+    assert upgrade.main(['--backup-dir',str(backup),'--current-link',str(link)])==0
+    assert link.resolve()==root
+    assert 'ln -sfn' in (backup/'rollback.sh').read_text()
+
+
 @pytest.mark.parametrize('case', ['modified', 'wrong-image', 'missing-key', 'ambiguous-mount', 'stopped', 'same-version-tag', 'changed-port'])
 def test_preflight_failure_does_not_stop_active_container(tmp_path, monkeypatch, case):
     root, _, runtime, calls, container = setup(tmp_path, monkeypatch, wrong_image=case == 'wrong-image')

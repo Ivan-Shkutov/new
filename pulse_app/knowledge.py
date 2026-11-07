@@ -26,7 +26,7 @@ class Knowledge:
         self.provider = os.getenv('PULSE_EMBEDDINGS_PROVIDER', 'ollama')
         self.revision = os.getenv('PULSE_EMBEDDINGS_REVISION','')
         self.dimension = int(os.getenv('PULSE_EMBEDDINGS_DIMENSION', '1024'))
-        self.fingerprint = hashlib.sha256(f'{self.model}:{self.dimension}:{self.provider}:{self.revision}:chunks-v1'.encode()).hexdigest()[:16]
+        self.fingerprint = hashlib.sha256(f'{self.model}:{self.dimension}:{self.provider}:{self.revision}:chunks-v2'.encode()).hexdigest()[:16]
         self.collection = 'pulse_docs_' + self.fingerprint
         with store.connect() as c:
             c.execute('''CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -34,6 +34,8 @@ class Knowledge:
                 source TEXT NOT NULL, product TEXT NOT NULL, version TEXT NOT NULL,
                 language TEXT NOT NULL, body TEXT NOT NULL, revision TEXT NOT NULL,
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '')''')
+            c.execute('CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(id UNINDEXED,body)')
+            c.execute('INSERT INTO knowledge_fts SELECT id,body FROM knowledge_documents WHERE id NOT IN (SELECT id FROM knowledge_fts)')
 
     @property
     def configured(self):
@@ -124,18 +126,27 @@ class Knowledge:
             d={k:document.get(k,'') for k in fields}
             did=hashlib.sha256(json.dumps([d[k] for k in ('cluster_id','source','product','version','language','name')],ensure_ascii=False).encode()).hexdigest()
             revision=hashlib.sha256(d['body'].encode()).hexdigest()
+            old=self.store.rows("SELECT revision,fingerprint,status FROM knowledge_documents WHERE id=?",(did,))
+            if old and old[0]=={'revision':revision,'fingerprint':self.fingerprint,'status':'ready'}:
+                remote=self.request('GET','/collections/'+self.collection)
+                if remote is not None:
+                    self.collection_info(remote)
+                    return {'id':did,'status':'ready','unchanged':True}
             size=self.store.rows('SELECT coalesce(sum(length(body)),0) AS n FROM knowledge_documents WHERE id!=?',(did,))[0]['n']
             if size+len(d['body'])>500_000_000:raise ConnectorError('Корпус превышает 500 млн символов')
             with self.store.connect() as c:
                 c.execute('INSERT OR REPLACE INTO knowledge_documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(did,*[d[k] for k in fields],revision,self.fingerprint,'indexing',''))
+                c.execute('DELETE FROM knowledge_fts WHERE id=?',(did,))
+                c.execute('INSERT INTO knowledge_fts VALUES (?,?)',(did,d['body']))
             try:
                 self.ensure()
-                chunks=[d['body'][i:i+1800] for i in range(0,len(d['body']),1550)]
+                from .markdown_chunks import chunks as split_markdown
+                chunks=split_markdown(d['body'])
                 for start in range(0,len(chunks),16):
-                    batch=chunks[start:start+16];vectors=self.embed(batch);points=[]
-                    for i,(text,vector) in enumerate(zip(batch,vectors),start):
+                    batch=chunks[start:start+16];vectors=self.embed([r['text'] for r in batch]);points=[]
+                    for i,(chunk,vector) in enumerate(zip(batch,vectors),start):
                         pid=str(uuid.uuid5(uuid.NAMESPACE_URL,f'{did}:{revision}:{i}'))
-                        points.append({'id':pid,'vector':vector,'payload':{k:v for k,v in {**d,'body':None,'doc_id':did,'revision':revision,'chunk':i,'text':text}.items() if k!='body'}})
+                        points.append({'id':pid,'vector':vector,'payload':{k:v for k,v in {**d,'body':None,'doc_id':did,'revision':revision,'chunk':i,**chunk}.items() if k!='body'}})
                     self.request('PUT','/collections/'+self.collection+'/points?wait=true',{'points':points})
                 self.store.execute("UPDATE knowledge_documents SET status='ready',error='' WHERE id=?",(did,))
                 # Remove old revisions only after publishing the new one.
@@ -173,9 +184,18 @@ class Knowledge:
             if len(hits)>=limit:break
         return hits,('Семантический поиск: совпадений '+str(len(hits)))
 
+    def lexical(self, query, cid, limit=4, kubernetes_version=None, exclude_saas=False):
+        terms=list(dict.fromkeys(re.findall(r'[\w.-]+',query,re.UNICODE)))[:20]
+        if not terms:return []
+        match=' OR '.join('"'+t.replace('"','')+'"' for t in terms)
+        rows=self.store.rows("SELECT d.id,d.name,d.source,d.product,d.version,d.language,snippet(knowledge_fts,1,'','',' … ',100) AS excerpt FROM knowledge_fts JOIN knowledge_documents d ON d.id=knowledge_fts.id WHERE knowledge_fts MATCH ? AND d.cluster_id IN ('',?) AND d.status='ready' AND d.fingerprint=? ORDER BY rank LIMIT 30",(match,cid,self.fingerprint))
+        return [row for row in rows if not (exclude_saas and row['product']=='vk-workspace-saas')
+                and not (kubernetes_version and row['product']=='kubernetes' and row['version']!=kubernetes_version)][:limit]
+
     def delete(self, did):
         # Delete authoritative row first: orphan vectors cannot be cited even if Qdrant is down.
         count=self.store.execute('DELETE FROM knowledge_documents WHERE id=?',(did,))
+        self.store.execute('DELETE FROM knowledge_fts WHERE id=?',(did,))
         if not count:return False
         if self.configured:
             try:self.request('POST','/collections/'+self.collection+'/points/delete?wait=true',{'filter':{'must':[{'key':'doc_id','match':{'value':did}}]}})

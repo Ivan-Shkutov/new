@@ -44,7 +44,7 @@ CASES = {
 }
 
 
-def run_cases(api, selected=None, interval=1, deadline=240, on_result=None):
+def run_cases(api, selected=None, interval=1, deadline=360, on_result=None):
     rows=[]
     for name in selected or CASES:
         case=CASES[name];sid=None;started=time.monotonic()
@@ -105,7 +105,7 @@ def main(argv=None):
         def progress(row):
             print(row['case']+': '+row['status']+'; слов: '+str(row['words'])+'; правила: '+('применены' if row['policy_applied'] else 'не подтверждены'),flush=True)
             if args.show_answers:print(row['answer'] or row.get('error',''))
-        report=run_cases(api,None if args.case=='all' else [args.case],on_result=progress)
+        report=run_cases(api,None if args.case=='all' else [args.case],deadline=int(settings.get('timeout_seconds',300))+60,on_result=progress)
         report.update(version=health['version'],build_id=health['build_id'],model=settings.get('model',''))
         destination=runtime/'llm-check-report.json'
         with os.fdopen(os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),'w') as output:

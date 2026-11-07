@@ -137,83 +137,16 @@ def main():
         page.screenshot(path=str(args.screenshots/'cpu-detail.png'),full_page=True)
         page.get_by_role('button',name='Закрыть dashboard',exact=True).click()
         page.locator('.problem-table-body .ai-spark').first.click()
-        page.locator('#page-diagnostics').wait_for(state='visible')
-        try:page.locator('.scenario-summary').wait_for(timeout=5000)
-        except Exception:
-            print('Scenario test failed:',page.locator('#scenario-status').inner_text(),errors)
-            page.screenshot(path='/tmp/pulse-scenario-failure.png',full_page=True)
-            raise
-        expect(page.locator('#scenario-buttons [data-scenario]')).to_have_count(6)
-        assert page.locator('#page-diagnostics textarea').count()==0
-        assert page.locator('#scenario-result-body script').count()==0
-        assert '<script>alert(1)</script>' in page.locator('.scenario-summary').inner_text()
-        assert 'Неиспользуемый сырой ответ' not in page.locator('#scenario-result-body').inner_text()
-        expect(page.locator('.scenario-answer-table')).to_contain_text('Тестовые данные')
-        assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-        assert last_request[-1]['scenario']=='brief'
-        page.screenshot(path=str(args.screenshots/'analysis-brief.png'),full_page=True)
-        page.locator('#scenario-sources>summary').click()
-        page.locator('#scenario-evidence-E01>summary').click()
-        expect(page.locator('#scenario-evidence-E01')).to_contain_text('kubectl -n application get pod test -o json')
-        for scenario,_ in scenarios[1:]:
-            page.locator(f'#scenario-buttons [data-scenario={scenario}]').click()
-            expect(page.locator('.scenario-summary')).to_have_count(1)
-            expect(page.locator('#scenario-result')).to_have_attribute('aria-busy','false')
-            expect(page.locator('#scenario-result-body')).to_have_attribute('data-scenario-result',scenario)
-            assert last_request[-1]['scenario']==scenario
-            assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-            assert page.locator('#scenario-result-body script').count()==0
-            if scenario=='plan':
-                expect(page.locator('.scenario-command code')).to_have_text('kubectl -n application get pod test -o json')
-                expect(page.locator('#scenario-result-body')).to_contain_text('Ожидается: UID и причина совпадают')
-                page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
-            if scenario=='recovery':
-                expect(page.locator('.scenario-recovery-state')).to_have_attribute('data-recovery-state','unconfirmed')
-        assert len(last_request)==6
-        assert all('question' not in body and 'previous_id' not in body for body in last_request)
+        expect(page.locator('#ai-dialog')).to_be_visible()
+        expect(page.locator('#ai-form [type=submit]')).to_be_enabled()
+        expect(page.locator('.chat-turn')).to_have_count(0)
+        assert page.locator('#navigation [data-page=diagnostics]').count()==0
         page.screenshot(path=str(args.screenshots/'ai-context.png'),full_page=True)
         page.set_viewport_size({'width':390,'height':844})
-        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
-        expect(page.locator('#scenario-rerun')).to_be_visible()
-        assert page.locator('#page-diagnostics textarea').count()==0
+        assert page.locator('#ai-dialog').evaluate('(e)=>e.scrollWidth<=e.clientWidth+1')
         page.screenshot(path=str(args.screenshots/'ai-mobile.png'),full_page=True)
-        broken[0]=True
-        requests_before_provider=len(last_request)
-        page.locator('#scenario-provider').select_option('local')
-        expect(page.locator('.scenario-summary')).to_have_count(0)
-        assert len(last_request)==requests_before_provider
-        page.locator('#scenario-buttons [data-scenario=brief]').click()
-        expect(page.locator('.scenario-summary')).to_have_count(1)
-        expect(page.locator('.scenario-summary')).to_contain_text('превышен лимит EmptyDir')
-        expect(page.locator('#scenario-status')).to_contain_text('ИИ не завершил разбор')
-        assert 'OOM исключён' not in page.locator('#scenario-result-body').inner_text()
-        assert 'unfinished' not in page.locator('#scenario-result-body').inner_text()
-        assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-        page.locator('#scenario-sources>summary').click()
-        expect(page.locator('#scenario-sources')).to_contain_text('Local model HTTP 503')
-        assert 'OOM исключён' not in page.locator('#scenario-sources').inner_text()
-        expect(page.locator('.scenario-answer-table')).to_contain_text('заполнение диска узла не доказано')
-        page.screenshot(path=str(args.screenshots/'interrupted-reply.png'),full_page=True)
-        # Leaving the page deletes the volatile session; returning shows an empty state.
-        page.locator('a[data-page=overview]').click()
-        page.locator('#page-overview').wait_for(state='visible')
-        page.locator('a[data-page=diagnostics]').click()
-        page.locator('#page-diagnostics').wait_for(state='visible')
-        expect(page.locator('.scenario-summary')).to_have_count(0)
-        expect(page.locator('#scenario-target')).to_contain_text('Выберите объект')
-        expect(page.locator('#scenario-rerun')).to_be_disabled()
-        assert closed
-        page.locator('a[data-page=overview]').click()
-        page.locator('#page-overview').wait_for(state='visible')
-        broken[0]=False
-        page.locator('.problem-table-body .ai-spark').first.click()
-        expect(page.locator('.scenario-summary')).to_have_count(1)
-        expect(page.locator('.scenario-summary')).to_contain_text('Причина пока не установлена')
-        assert len(jobs)==1
-        assert last_request[-1]['scenario']=='brief'
-        assert not page.locator('#scenario-sources').evaluate('(e)=>e.open')
-        page.locator('a[data-page=overview]').click()
-        page.locator('#page-overview').wait_for(state='visible')
+        page.get_by_role('button',name='Закрыть анализ',exact=True).click()
+        expect(page.locator('#ai-conversation')).to_be_empty()
         page.locator('.problem-pager').get_by_role('button',name='→',exact=True).click()
         expect(page.locator('.problem-pager')).to_contain_text('26–50')
         page.set_viewport_size({'width':390,'height':844})
@@ -227,7 +160,7 @@ def main():
         expect(page.locator('[data-testid=nodes-ready]')).to_have_class(__import__('re').compile('unknown'))
         assert not errors,errors
         browser.close()
-    print('PASS: fixture overview at 1920x1080 and 1366x768; 3/3/7 rows; node/metric drilldowns; 80 paginated problems; six scenarios; one result; collapsed evidence; local-model failure fallback; safe DOM; fresh reopen; mobile; stale/critical states')
+    print('PASS: fixture overview at 1920x1080 and 1366x768; 3/3/7 rows; node/metric drilldowns; 80 paginated problems; overview conversation; empty initial context; mobile composer; close clears state; mobile; stale/critical states')
 
 
 if __name__=='__main__':main()

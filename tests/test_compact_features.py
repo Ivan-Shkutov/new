@@ -78,7 +78,7 @@ def test_holmes_bundle_scopes_token_hides_keys_and_does_not_enable_agent(client,
     token=config['config']['default_headers']['Authorization']
     assert token not in result.text and 'model-secret' not in client.get('/api/clusters').text
     assert json.loads((root/'compose.yaml').read_text())['services']['holmes']['volumes']==['.:/bundle:ro']
-    assert len(list((root/'skills').glob('*/SKILL.md')))==12
+    assert len(list((root/'skills').glob('*/SKILL.md')))==16
     assert (root/'model_list.json').stat().st_mode&0o077==0
     assert client.get('/agent/one/snapshot',auth=None).status_code==401
     assert client.get('/agent/one/snapshot',auth=None,headers={'Authorization':token}).status_code==200

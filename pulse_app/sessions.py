@@ -67,6 +67,19 @@ class Sessions:
                 self.items[sid]['scenario_generation'] = generation
             return copy.deepcopy(self.items[sid]['scenario_target'])
 
+    def bind_dialog(self, sid, target, generation):
+        """A conversation may follow one incident, never another UID or source config."""
+        with self.lock:
+            session = self.get(sid)
+            previous = session.get('dialog_target')
+            keys = ('cluster_id', 'kind', 'namespace', 'name', 'uid', 'metric')
+            if previous is not None and (any(previous.get(k, '') != target.get(k, '') for k in keys)
+                                         or session.get('dialog_generation') != generation):
+                raise ValueError('Объект или подключение изменилось. Откройте новый анализ.')
+            self.items[sid]['dialog_target'] = copy.deepcopy(target)
+            self.items[sid]['dialog_generation'] = generation
+            return copy.deepcopy(target)
+
     def update(self, sid, jid, fields):
         with self.lock:
             self.prune()

@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -199,7 +200,7 @@ def create_app(runtime=None, polling=True):
         cfg = row['config']
         astra={k:v for k,v in cfg.get('astra',{}).items() if k in ('url','cluster_field','cluster_value','namespace_field','pod_field')}
         astra['has_token']=bool(cfg.get('astra',{}).get('token'))
-        return {'astra':astra,'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key'))}, 'astra_ai':{'enabled':bool(cfg.get('astra_ai',{}).get('enabled')),'url':cfg.get('astra_ai',{}).get('url',''),'model':cfg.get('astra_ai',{}).get('model',''),'has_key':bool(cfg.get('astra_ai',{}).get('api_key'))}}
+        return {'astra':astra,'id': row['id'], 'name': row['name'], 'enabled': bool(row['enabled']), 'has_metrics': connectors.metrics_configured(cfg.get('metrics', {})), 'has_astra': bool(cfg.get('astra', {}).get('url')), 'metrics':{k:v for k,v in cfg.get('metrics',{}).items() if k in ('url','transport','namespace','service','port','mode','labels')}, 'holmes':{'enabled':bool(cfg.get('holmes',{}).get('enabled')), 'url':cfg.get('holmes',{}).get('url',''),'model':cfg.get('holmes',{}).get('model',''),'has_key':bool(cfg.get('holmes',{}).get('api_key')),'timeout_seconds':cfg.get('holmes',{}).get('timeout_seconds',600),**{k:cfg.get('holmes',{}).get(k,v) for k,v in [('max_steps',8),('max_tokens',4096),('model_timeout_seconds',180)]}}, 'astra_ai':{'enabled':bool(cfg.get('astra_ai',{}).get('enabled')),'url':cfg.get('astra_ai',{}).get('url',''),'model':cfg.get('astra_ai',{}).get('model',''),'has_key':bool(cfg.get('astra_ai',{}).get('api_key'))}}
 
     from . import dashboard, health
     metric_cache = {}
@@ -335,6 +336,9 @@ def create_app(runtime=None, polling=True):
 
     def validate_source(source):
         from urllib.parse import urlparse
+        from .ai_limits import validate
+        try: validate(source)
+        except ValueError as exc: raise HTTPException(422, str(exc)) from None
         # Reject invalid configuration while saving, before background workers
         # construct headers, SSL contexts or PromQL. Never echo secret values.
         for field, maximum in {'url': 4096, 'model': 200, 'username': 1024,
@@ -573,7 +577,8 @@ def create_app(runtime=None, polling=True):
     @api.get('/settings')
     def settings():
         llm = db().settings().get('llm', {})
-        return {'llm': {'url':llm.get('url',''), 'model':llm.get('model',''), 'has_key': bool(llm.get('api_key'))}, 'poll_seconds': interval}
+        from .ai_limits import limits
+        return {'llm': {'url':llm.get('url',''), 'model':llm.get('model',''), 'has_key': bool(llm.get('api_key')), **limits(llm)}, 'poll_seconds': interval}
 
     class SettingsInput(BaseModel):
         llm: dict
@@ -651,6 +656,18 @@ def create_app(runtime=None, polling=True):
     def knowledge_status():
         return state['knowledge'].status()
 
+    @api.get('/knowledge/imports')
+    def knowledge_imports():
+        folder=runtime/'library-reports'
+        reports=[]
+        if folder.is_dir():
+            for path in sorted(folder.glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:100]:
+                if path.is_symlink() or path.stat().st_size>1_000_000:continue
+                try:report=json.loads(path.read_text())
+                except (OSError,ValueError):continue
+                if isinstance(report,dict):reports.append(connectors.redact_structure(report))
+        return {'items':reports}
+
     @api.get('/knowledge/documents')
     def knowledge_documents(cluster_id: str='',offset: int=0,limit: int=100):
         scope(cluster_id)
@@ -719,8 +736,9 @@ def create_app(runtime=None, polling=True):
 
     def investigate(jid, body, cfg, llm, resolved_context, source_stamp=None):
         live_report={}
+        run_started=time.monotonic()
         def check_scenario_sources():
-            if not body.scenario:return
+            if not body.scenario and not source_stamp:return
             current=db().cluster(body.cluster_id)
             if not current or scenario_source_stamp(current['config'],db().settings().get('llm',{}))!=source_stamp:
                 raise ScenarioSourcesChanged('Подключение или настройки источника изменились. Откройте диагностику заново.')
@@ -803,6 +821,13 @@ def create_app(runtime=None, polling=True):
                 context=json.dumps(connectors.redact_structure(model_evidence(live_report)),ensure_ascii=False)
             else:
                 context=evidence
+            if not body.scenario and not body.chat and (resolved_context.get('metric') or resolved_context.get('kind') not in (None,'pods')):
+                from .resource_diagnostics import collect_resource
+                from .diagnostics import model_evidence
+                live_report=collect_resource(cfg,resolved_context,snap,scenario='deep')
+                context=json.dumps(connectors.redact_structure(model_evidence(live_report)),ensure_ascii=False)
+                update(evidence=json.dumps(connectors.redact_structure(live_report),ensure_ascii=False))
+                trace.extend({'tool':r['id']+' '+r['check'],'status':r['status']} for r in live_report.get('records',[]))
             if body.scenario:
                 from . import workflows
                 if not live_report:
@@ -831,14 +856,19 @@ def create_app(runtime=None, polling=True):
             trace.extend({'tool':'skill:'+r['id'],'status':'selected','version':r['version']} for r in selected_skills)
             docs = connectors.redact_structure(search_docs(body.question, body.cluster_id))
             trace.append({'tool':'Documents FTS','status':'matches '+str(len(docs))})
-            retrieval_query=body.question+' '+str(resolved_context.get('reason',''))+' '+str(resolved_context.get('detail',''))[:1200]
+            retrieval_query=(str(live_report.get('pod',{}).get('message',''))[:1200]+' '+str(resolved_context.get('reason',''))+' '+str(resolved_context.get('detail',''))[:1200]+' '+body.question).strip()
+            version=re.match(r'v(\d+\.\d+)',snap.get('cluster_info',{}).get('server_version') or '')
+            search_options={'kubernetes_version':version[1] if version else None,'exclude_saas':not body.chat and any(r['id']=='vkteams' for r in selected_skills)}
             try:
-                version=re.match(r'v(\d+\.\d+)',snap.get('cluster_info',{}).get('server_version') or '')
-                vector_docs,vector_note=state['knowledge'].search(retrieval_query+' '+str(live_report.get('pod',{}).get('message',''))[:1000],body.cluster_id,kubernetes_version=version[1] if version else None,exclude_saas=not body.chat and any(r['id']=='vkteams' for r in selected_skills))
+                vector_docs,vector_note=state['knowledge'].search(retrieval_query,body.cluster_id,**search_options)
             except connectors.ConnectorError as exc:
                 vector_docs=[];vector_note=str(exc)
-            docs=docs+connectors.redact_structure(vector_docs)
+            exact_docs=state['knowledge'].lexical(retrieval_query,body.cluster_id,**search_options)
+            vector_ids={d.get('name') for d in vector_docs}
+            docs=docs+connectors.redact_structure(vector_docs+[d for d in exact_docs if d.get('name') not in vector_ids])
+            docs=[{**doc,'document_id':doc.get('id',''),'id':f'D{i:02d}'} for i,doc in enumerate(docs,1)]
             trace.append({'tool':'Qdrant + '+state['knowledge'].model,'status':vector_note})
+            trace.append({'tool':'knowledge-sources','status':'retrieved before generation','documents':docs})
             # Volatile dialogs start without transcripts or resolutions from
             # earlier investigations; follow-up stays inside the current session.
             incidents = [] if body.session_id else db().rows('SELECT question,solution FROM incidents WHERE cluster_id=? ORDER BY created_at DESC LIMIT 3', (body.cluster_id,))
@@ -865,6 +895,12 @@ def create_app(runtime=None, polling=True):
                 if size>24000:break
                 history=pair+history;parent=previous.get('previous_id')
             messages[1:1]=history
+            check_scenario_sources()
+            from .ai_limits import limits
+            engine_settings=cfg.get('astra_ai') if cfg.get('astra_ai',{}).get('enabled') else cfg.get('holmes') if cfg.get('holmes',{}).get('enabled') else llm
+            trace.append({'tool':'generation-budget','status':'configured',**limits(engine_settings or {},agent=bool(cfg.get('holmes',{}).get('enabled')))})
+            model_started=time.monotonic()
+            update(trace=json.dumps(connectors.redact_structure(trace),ensure_ascii=False))
             if cfg.get('astra_ai',{}).get('enabled'):
                 from .astra_ai import chat as astra_chat
                 trace.append({'tool':'engine','status':'Astra AI / SSE'})
@@ -882,6 +918,8 @@ def create_app(runtime=None, polling=True):
             else:
                 answer=connectors.llm_chat(llm,messages)
                 trace.append({'tool':'engine','status':'local LLM'})
+            trace.append({'tool':'model-completion','status':'complete','elapsed_seconds':round(time.monotonic()-model_started,2),**getattr(answer,'metadata',{})})
+            check_scenario_sources()
             if body.scenario:
                 check_scenario_sources()
                 result=workflows.build_result(body.scenario,live_report,model_answer=answer,context=resolved_context)
@@ -891,7 +929,7 @@ def create_app(runtime=None, polling=True):
                 return
             if live_report:
                 from .diagnostics import verified_summary,review_answer
-                warnings=review_answer(live_report,answer)
+                warnings=review_answer(live_report,answer,docs)
                 trace.append({'tool':'answer-review','status':'needs_review' if warnings else 'checked','warnings':warnings,'note':'Проверены ссылки и явная причина; семантическая точность не гарантируется.'})
                 answer=verified_summary(live_report,body.mode)+'\n\n## Анализ модели по доказательствам\n'+answer
             answer=connectors.redact_sensitive_text(answer)
@@ -931,7 +969,8 @@ def create_app(runtime=None, polling=True):
                 partial=exc.partial if isinstance(exc,IncompleteAnswer) else ''
                 update(answer=verified_summary(live_report,body.mode)+('\n\n## Незавершённый ответ модели\n'+partial if partial else ''))
             elif isinstance(exc,IncompleteAnswer):update(answer=exc.partial)
-            partial_trace=locals().get('trace',[])+[{'tool':'analysis','status':'failed'}]
+            from .ai_limits import error_code
+            partial_trace=locals().get('trace',[])+[{'tool':'analysis','status':'failed','code':error_code(error),'run_id':jid,'elapsed_seconds':round(time.monotonic()-run_started,2)}]
             update(status='failed',error=error,trace=json.dumps(connectors.redact_structure(partial_trace),ensure_ascii=False))
         finally:
             slots.release()
@@ -1075,10 +1114,14 @@ def create_app(runtime=None, polling=True):
         return {'id':jid,'status':'queued'}
 
     class SessionMessage(BaseModel):
+        model_config = {'extra':'forbid'}
         question: str = Field(min_length=3,max_length=4000)
         problem_id: Optional[str] = Field(default=None,max_length=64)
         metric: Optional[str] = Field(default=None,pattern='^(cpu|ram|disk)$')
         mode: str = Field(default='extended',pattern='^(brief|extended|causes|impact|commands)$')
+        namespace: Optional[str] = Field(default=None,max_length=63,pattern=r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$')
+        pod: Optional[str] = Field(default=None,max_length=253,pattern=r'^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$')
+        uid: Optional[str] = Field(default=None,max_length=128,pattern=r'^[A-Za-z0-9_-]+$')
 
     @api.post('/sessions/{sid}/messages',status_code=202)
     def session_message(sid: str, request_body: SessionMessage):
@@ -1088,7 +1131,8 @@ def create_app(runtime=None, polling=True):
         cfg=dict(cluster(cid)['config']) if cid else {}
         if current['engine']=='local':
             cfg.pop('astra_ai',None);cfg.pop('holmes',None)
-        body=Investigate(cluster_id=cid,session_id=sid,chat=current['mode']=='chat',**request_body.model_dump())
+        payload=request_body.model_dump(exclude={'uid'})
+        body=Investigate(cluster_id=cid,session_id=sid,chat=current['mode']=='chat',**payload)
         if body.chat:body.problem_id=None;body.metric=None
         resolved={}
         if body.problem_id:
@@ -1097,6 +1141,12 @@ def create_app(runtime=None, polling=True):
             body.namespace=resolved.get('namespace') or None
             body.pod=resolved['name'] if resolved.get('kind')=='pods' else None
         if body.metric:resolved={'metric':body.metric,'cluster_id':cid}
+        if request_body.pod or request_body.namespace or request_body.uid:
+            if body.chat or request_body.problem_id or request_body.metric or not (request_body.pod and request_body.namespace and request_body.uid):
+                raise HTTPException(422,'Укажите одну цель: namespace, pod и uid')
+            try:connectors._name(request_body.pod,'pod')
+            except connectors.ConnectorError as exc:raise HTTPException(422,str(exc)) from None
+            resolved={'cluster_id':cid,'kind':'pods','namespace':request_body.namespace,'name':request_body.pod,'uid':request_body.uid}
         if current['jobs']:
             last=list(current['jobs'].values())[-1]
             if last['status']=='done' or (last['status']=='failed' and last.get('answer')):body.previous_id=last['id']
@@ -1105,6 +1155,11 @@ def create_app(runtime=None, polling=True):
                 body.namespace=resolved.get('namespace') or None
                 body.pod=resolved.get('name') if resolved.get('kind')=='pods' else None
         llm=db().settings().get('llm',{});engine=selected_engine(cfg,llm)
+        source_stamp=None
+        if not body.chat and resolved:
+            source_stamp=scenario_source_stamp(cluster(cid)['config'],llm)
+            try: resolved=sessions.bind_dialog(sid,resolved,source_stamp)
+            except ValueError as exc:raise HTTPException(409,str(exc)) from None
         from .cluster_chat import inventory_intent
         if (not engine.get('url') or not engine.get('model')) and not (cid and not body.pod and not body.namespace and inventory_intent(body.question)):raise HTTPException(409,'Настройте выбранный движок ИИ')
         if not slots.acquire(blocking=False):raise HTTPException(429,'Очередь заполнена')
@@ -1112,7 +1167,7 @@ def create_app(runtime=None, polling=True):
         try:
             job=dict(id=jid,cluster_id=cid,question=body.question,status='queued',answer='',error='',created_at=now(),previous_id=body.previous_id or '',context=json.dumps(connectors.redact_structure(resolved),ensure_ascii=False),trace='[]',evidence='{}')
             sessions.add(sid,job)
-            pool.submit(investigate,jid,body,cfg,llm,resolved)
+            pool.submit(investigate,jid,body,cfg,llm,resolved,source_stamp)
         except (ValueError,SessionGone) as e:
             slots.release();raise HTTPException(409,str(e) or 'Диалог закрыт')
         except Exception:
@@ -1154,6 +1209,9 @@ def create_app(runtime=None, polling=True):
     class HolmesBootstrap(BaseModel):
         port: int = Field(default=5051,ge=1024,le=65535)
         image: str = Field(default='us-central1-docker.pkg.dev/genuine-flight-317411/devel/holmes:0.45.0',min_length=3,max_length=300,pattern=r'^[A-Za-z0-9][A-Za-z0-9._/:@-]+$')
+        max_steps: int = Field(default=8,ge=2,le=16,strict=True)
+        max_tokens: int = Field(default=4096,ge=256,le=32768,strict=True)
+        timeout_seconds: int = Field(default=180,ge=15,le=900,strict=True)
 
     @api.post('/clusters/{cid}/holmes-bootstrap')
     def bootstrap_holmes(cid: str, body: HolmesBootstrap, request: Request):
@@ -1179,9 +1237,9 @@ def create_app(runtime=None, polling=True):
                 if not current or json.dumps(db().decrypt(current['config']),sort_keys=True)!=original:
                     raise HTTPException(409,'Подключение изменилось. Повторите генерацию Holmes.')
                 if (runtime/'holmes'/cid).exists():raise HTTPException(409,'Конфигурация Holmes уже существует.')
-                root=write_bundle(runtime,cid,portal_port,body.port,body.image,llm,token,key)
+                root=write_bundle(runtime,cid,portal_port,body.port,body.image,llm,token,key,max_steps=body.max_steps,max_tokens=body.max_tokens,timeout_seconds=body.timeout_seconds)
                 cfg['holmes_agent_token']=token
-                cfg['holmes']={'enabled':False,'url':f'http://127.0.0.1:{body.port}','model':'pulse-local','api_key':key}
+                cfg['holmes']={'enabled':False,'url':f'http://127.0.0.1:{body.port}','model':'pulse-local','api_key':key,'timeout_seconds':600,'max_steps':body.max_steps,'max_tokens':body.max_tokens,'model_timeout_seconds':body.timeout_seconds}
                 connection.execute('UPDATE clusters SET config=? WHERE id=?',(db().encrypt(cfg),cid))
         except Exception:
             if root is not None:
@@ -1190,6 +1248,34 @@ def create_app(runtime=None, polling=True):
             raise
         # Container path differs from host path; the host-side CLI prints the real command.
         return {'ok':True,'relative_path':'holmes/'+cid,'port':body.port,'enabled':False,'note':'Запустите отдельный Holmes, проверьте ответ, затем включите режим в настройках кластера.'}
+
+    class HolmesBudgets(BaseModel):
+        model_config={'extra':'forbid'}
+        max_steps: int = Field(default=8,ge=2,le=16,strict=True)
+        max_tokens: int = Field(default=4096,ge=256,le=32768,strict=True)
+        timeout_seconds: int = Field(default=180,ge=15,le=900,strict=True)
+
+    holmes_refresh_lock=threading.Lock()
+
+    @api.post('/clusters/{cid}/holmes-refresh')
+    def refresh_holmes(cid: str,body: HolmesBudgets):
+        cluster(cid)
+        if not holmes_refresh_lock.acquire(blocking=False):raise HTTPException(409,'Обновление Holmes уже выполняется')
+        try:
+            from .holmes_bundle import refresh_bundle
+            backup=refresh_bundle(runtime,cid,**body.model_dump())
+            with db().connect() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                current=connection.execute('SELECT config FROM clusters WHERE id=?',(cid,)).fetchone()
+                if current:
+                    config=db().decrypt(current['config'])
+                    config.setdefault('holmes',{}).update(max_steps=body.max_steps,max_tokens=body.max_tokens,model_timeout_seconds=body.timeout_seconds)
+                    connection.execute('UPDATE clusters SET config=? WHERE id=?',(db().encrypt(config),cid))
+            return {'ok':True,'backup':str(backup.relative_to(runtime)), 'restart_required':True,
+                    'note':'Ключи, модель, URL и Compose сохранены. Пересоздайте Holmes и повторите проверку инструментов.'}
+        except (OSError,ValueError):
+            raise HTTPException(409,'Не удалось обновить bundle Holmes. Проверьте каталог runtime/holmes/'+cid) from None
+        finally:holmes_refresh_lock.release()
 
     def agent_config(cid,request):
         cfg=cluster(cid)['config']
@@ -1208,7 +1294,8 @@ def create_app(runtime=None, polling=True):
         challenges=state.setdefault('holmes_challenges',{})
         if cid in challenges and challenges[cid][1]>time.monotonic():
             raise HTTPException(409,'Проверка уже выполняется')
-        challenges[cid]=(nonce,time.monotonic()+180)
+        from .ai_limits import limits
+        challenges[cid]=(nonce,time.monotonic()+limits(settings,agent=True)['timeout_seconds'])
         portal_port=8090
         if (runtime/'.env').exists():
             portal_port=int(next((line.split('=',1)[1] for line in (runtime/'.env').read_text().splitlines() if line.startswith('PULSE_PORT=')),'8090'))
